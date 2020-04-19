@@ -1,0 +1,57 @@
+Economic approach outline
+
+Goals:
+Create a basic website
+Choose framework (Voting result: Flask)
+Outline GUI / landing page contents
+Interactivity?
+Graphs/Info to include?
+
+Web scraping
+Economic asset values
+Indices
+Dow Jones
+Nasdaq
+Nikkei 225(Japan)
+HANG SENG(hong Kong)
+FTSE 100
+Dax
+Stocks
+Amazon
+Apple
+Netflix
+Tesla
+IBM
+INTC(Intel)
+MSFT
+JNJ(Johnson & Johnson)
+GE
+CAT(caterpillar)
+3M
+BAC
+AXP(american express)
+Chevron
+BP
+F(Ford)
+Rolls-Royce Holdings
+BA(Boeing)
+DAL(DELTA AIRLINES)
+CCL(Carnival)
+Crypto
+BTC
+ETH
+XRP (can use this or any other) 
+Commodities
+Oil
+Gold
+News articles (ML)?
+How do news articles affect stock prices?
+Can we find a correlation between published articles and changes in stock prices?
+
+Financial API = https://finnhub.io/
+Free version 60 calls/ min
+Access to over 60 stock markets
+Restful API and Websocket
+
+Info we should pull
+Price, change, % chage, YTD change
