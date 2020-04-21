@@ -54,4 +54,6 @@ Access to over 60 stock markets
 Restful API and Websocket
 
 Info we should pull
-Price, change, % chage, YTD change
+Symbol[weight:0], metrics(YTD, 52 week high, 52 week high date, 52 week low, 52 week low date, or maybe 13 week price return daily, price)[weight:5] 
+finn hub api only has covid stats from USA
+
