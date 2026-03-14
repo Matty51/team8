@@ -64,6 +64,9 @@ class MarketSnapshot:
     raw_lows: List[float] = field(default_factory=list)
     raw_closes: List[float] = field(default_factory=list)
 
+    # Pin bar detection
+    pin_bar: Optional[ind.PinBar] = None
+
     # Trend
     trend: str = "neutral"  # "bullish", "bearish", "neutral"
 
@@ -151,6 +154,15 @@ class MarketScanner:
         if len(highs) >= 2:
             pivots = ind.pivot_points(highs[-2], lows[-2], closes[-2])
 
+        # Pin bar detection on current candle
+        pin_bar = ind.detect_pin_bar(
+            open_price=curr_open,
+            high=curr_high,
+            low=curr_low,
+            close=price,
+            atr_value=atr_values[-1],
+        )
+
         snapshot = MarketSnapshot(
             symbol=symbol,
             timeframe=self.config.timeframe,
@@ -180,6 +192,7 @@ class MarketScanner:
             raw_highs=highs,
             raw_lows=lows,
             raw_closes=closes,
+            pin_bar=pin_bar,
             trend=trend,
         )
 

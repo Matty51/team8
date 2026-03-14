@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional
 
+from . import indicators as ind
 from .config import Config
 from .levels import ExitPlan, LevelManager
 from .scanner import MarketSnapshot
@@ -51,11 +52,7 @@ class SMACrossoverStrategy:
     def __init__(self, config: Config):
         self.config = config
 
-    def _position_size(self) -> float:
-        """Risk-based position sizing: risk_pct of capital / stop_loss distance."""
-        risk_usd = self.config.starting_capital * (self.config.risk_per_trade_pct / 100)
-        size = risk_usd / (self.config.stop_loss_pct / 100)
-        return min(size, self.config.max_position_size_usd)
+    # Position sizing now handled by position_size_from_risk()
 
     def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
         if snapshot.sma_fast is None or snapshot.sma_slow is None:
@@ -110,12 +107,20 @@ class SMACrossoverStrategy:
             else price * (1 - self.config.take_profit_pct / 100)
         )
 
+        size_usd = position_size_from_risk(
+            capital=self.config.starting_capital,
+            risk_pct=self.config.risk_per_trade_pct,
+            entry=price,
+            stop=stop_loss,
+            max_size=self.config.max_position_size_usd,
+        )
+
         return Signal(
             strategy_name=self.NAME,
             symbol=snapshot.symbol,
             side=side,
             price=price,
-            size_usd=self._position_size(),
+            size_usd=size_usd,
             stop_loss=stop_loss,
             take_profit=take_profit,
             confidence=confidence,
@@ -189,12 +194,20 @@ class RSIStrategy:
             else price * (1 - self.config.take_profit_pct / 100)
         )
 
+        size_usd = position_size_from_risk(
+            capital=self.config.starting_capital,
+            risk_pct=self.config.risk_per_trade_pct * 0.7,  # smaller for mean reversion
+            entry=price,
+            stop=stop_loss,
+            max_size=self.config.max_position_size_usd,
+        )
+
         return Signal(
             strategy_name=self.NAME,
             symbol=snapshot.symbol,
             side=side,
             price=price,
-            size_usd=self._position_size() * 0.7,  # smaller for mean reversion
+            size_usd=size_usd,
             stop_loss=stop_loss,
             take_profit=take_profit,
             confidence=confidence,
@@ -267,12 +280,20 @@ class MACDStrategy:
             else price * (1 - self.config.take_profit_pct / 100)
         )
 
+        size_usd = position_size_from_risk(
+            capital=self.config.starting_capital,
+            risk_pct=self.config.risk_per_trade_pct * 0.6,
+            entry=price,
+            stop=stop_loss,
+            max_size=self.config.max_position_size_usd,
+        )
+
         return Signal(
             strategy_name=self.NAME,
             symbol=snapshot.symbol,
             side=side,
             price=price,
-            size_usd=self._position_size() * 0.6,
+            size_usd=size_usd,
             stop_loss=stop_loss,
             take_profit=take_profit,
             confidence=confidence,
@@ -344,12 +365,180 @@ class VolumeSpikeStrategy:
             else price * (1 - tp_pct / 100)
         )
 
+        size_usd = position_size_from_risk(
+            capital=self.config.starting_capital,
+            risk_pct=self.config.risk_per_trade_pct * 0.5,  # smaller for breakouts
+            entry=price,
+            stop=stop_loss,
+            max_size=self.config.max_position_size_usd,
+        )
+
         return Signal(
             strategy_name=self.NAME,
             symbol=snapshot.symbol,
             side=side,
             price=price,
-            size_usd=self._position_size() * 0.5,  # smaller for breakouts
+            size_usd=size_usd,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            confidence=confidence,
+            reason=reason,
+        )
+
+
+def position_size_from_risk(
+    capital: float,
+    risk_pct: float,
+    entry: float,
+    stop: float,
+    max_size: float,
+) -> float:
+    """
+    Calculate position size using: $$$ Risk / (entry - stop).
+
+    This is the proper risk-based sizing formula shown in the
+    TradingView strategy. Instead of a flat dollar amount, it
+    calculates how many units you can buy such that if you get
+    stopped out, you only lose risk_pct of your capital.
+
+    Args:
+        capital: Total account capital
+        risk_pct: Percentage of capital to risk (e.g. 1.0 = 1%)
+        entry: Entry price
+        stop: Stop-loss price
+        max_size: Maximum position size in USD
+
+    Returns:
+        Position size in USD
+    """
+    risk_usd = capital * (risk_pct / 100)
+    distance = abs(entry - stop)
+    if distance == 0:
+        return 0.0
+
+    # Number of units = risk_usd / distance_per_unit
+    units = risk_usd / distance
+    size_usd = units * entry
+
+    return min(size_usd, max_size)
+
+
+class PinBarStrategy:
+    """
+    Pin Bar Reversal — trade candlestick rejection patterns.
+
+    Detects pin bars (hammers/shooting stars) and ranks them
+    by strength: STRONGEST > STRONGER > STRONG > INDECISION.
+
+    - Bullish pin bar (hammer): Long lower wick rejecting lower prices
+    - Bearish pin bar (shooting star): Long upper wick rejecting higher prices
+
+    Best for: reversals at key levels (Fib, S/R, pivot points).
+    Risk level: Medium (tight stops behind the wick).
+    """
+    NAME = "pin_bar"
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
+        # Detect pin bar on the current candle
+        pin = ind.detect_pin_bar(
+            open_price=snapshot.open_price,
+            high=snapshot.high,
+            low=snapshot.low,
+            close=snapshot.current_price,
+            atr_value=snapshot.atr,
+        )
+        if not pin:
+            return None
+
+        # Skip indecision candles (not strong enough signal alone)
+        if pin.strength == "indecision":
+            return None
+
+        price = snapshot.current_price
+        side = Side.BUY if pin.direction == "bullish" else Side.SELL
+
+        # Stop-loss goes behind the wick (the rejection point)
+        buffer = pin.candle_range * 0.1  # Small buffer past the wick
+        if side == Side.BUY:
+            stop_loss = pin.low - buffer
+        else:
+            stop_loss = pin.high + buffer
+
+        # Confidence from pin bar score + confirmation factors
+        confidence = pin.score
+
+        # Boost confidence when pin bar aligns with trend
+        if side == Side.BUY and snapshot.trend == "bullish":
+            confidence += 0.05
+        elif side == Side.SELL and snapshot.trend == "bearish":
+            confidence += 0.05
+
+        # Boost when pin bar appears at a key level (Fib, S/R)
+        at_key_level = False
+        if snapshot.fibonacci:
+            for ret in snapshot.fibonacci.retracements:
+                dist = abs(price - ret.price) / price * 100
+                if dist < 0.5:  # Within 0.5% of a fib level
+                    confidence += 0.08
+                    at_key_level = True
+                    break
+
+        if not at_key_level and snapshot.support_levels:
+            for s in snapshot.support_levels:
+                if abs(price - s) / price * 100 < 0.5:
+                    confidence += 0.05
+                    at_key_level = True
+                    break
+
+        if not at_key_level and snapshot.resistance_levels:
+            for r in snapshot.resistance_levels:
+                if abs(price - r) / price * 100 < 0.5:
+                    confidence += 0.05
+                    at_key_level = True
+                    break
+
+        # Boost if RSI confirms
+        if side == Side.BUY and snapshot.rsi and snapshot.rsi < 40:
+            confidence += 0.05
+        elif side == Side.SELL and snapshot.rsi and snapshot.rsi > 60:
+            confidence += 0.05
+
+        confidence = min(confidence, 0.95)
+
+        if confidence < self.config.min_confidence:
+            return None
+
+        # Take-profit at 2:1 R:R minimum
+        risk = abs(price - stop_loss)
+        if side == Side.BUY:
+            take_profit = price + (risk * 2)
+        else:
+            take_profit = price - (risk * 2)
+
+        # Position sizing: $$$ Risk / (entry - stop)
+        size_usd = position_size_from_risk(
+            capital=self.config.starting_capital,
+            risk_pct=self.config.risk_per_trade_pct,
+            entry=price,
+            stop=stop_loss,
+            max_size=self.config.max_position_size_usd,
+        )
+
+        level_str = " at key level" if at_key_level else ""
+        reason = (
+            f"Pin bar {pin.strength.upper()} {pin.direction} "
+            f"(wick ratio {pin.wick_ratio:.1f}x){level_str}"
+        )
+
+        return Signal(
+            strategy_name=self.NAME,
+            symbol=snapshot.symbol,
+            side=side,
+            price=price,
+            size_usd=size_usd,
             stop_loss=stop_loss,
             take_profit=take_profit,
             confidence=confidence,
@@ -368,6 +557,7 @@ class StrategyManager:
             RSIStrategy(config),
             MACDStrategy(config),
             VolumeSpikeStrategy(config),
+            PinBarStrategy(config),
         ]
 
     def generate_signals(

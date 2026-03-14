@@ -166,7 +166,8 @@ def atr(
 FIB_RETRACEMENT_LEVELS = [0.236, 0.382, 0.500, 0.618, 0.786]
 
 # Fibonacci extension levels (for take-profit targets beyond the move)
-FIB_EXTENSION_LEVELS = [1.000, 1.272, 1.618, 2.000, 2.618]
+# Includes higher extensions from TradingView (3.618, 4.236)
+FIB_EXTENSION_LEVELS = [1.000, 1.272, 1.618, 2.000, 2.618, 3.618, 4.236]
 
 
 @dataclass
@@ -409,3 +410,136 @@ def pivot_points(
         "S2": pivot - (high - low),
         "S3": pivot - 2 * (high - low),
     }
+
+
+# ── Pin Bar Detection ────────────────────────────────────────────────
+
+
+@dataclass
+class PinBar:
+    """Detected pin bar candlestick pattern."""
+    direction: str           # "bullish" or "bearish"
+    strength: str            # "strongest", "stronger", "strong", "indecision"
+    score: float             # 0.0–1.0 numeric strength
+    wick_ratio: float        # How long the wick is vs the body
+    body_position: float     # Where the body sits (0=bottom, 1=top)
+    candle_range: float      # High - Low
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+def detect_pin_bar(
+    open_price: float,
+    high: float,
+    low: float,
+    close: float,
+    atr_value: Optional[float] = None,
+) -> Optional[PinBar]:
+    """
+    Detect a pin bar (hammer/shooting star) candlestick pattern.
+
+    Pin bar anatomy:
+    - Long wick (shadow) on one side — shows rejection
+    - Small body — shows indecision resolved
+    - Little/no wick on the other side
+
+    Strength ranking (matches "The Pin Bar Story"):
+    - STRONGEST: Tiny body at the very end of the wick, no opposite wick
+    - STRONGER:  Small body near the end, tiny opposite wick
+    - STRONG:    Small body, noticeable opposite wick
+    - INDECISION: Equal wicks on both sides (doji-like)
+
+    Returns None if the candle is not a pin bar.
+    """
+    candle_range = high - low
+    if candle_range == 0:
+        return None
+
+    # Minimum candle size (filter noise) — use ATR if available
+    if atr_value and candle_range < atr_value * 0.5:
+        return None
+
+    body = abs(close - open_price)
+    body_ratio = body / candle_range
+
+    # Pin bars need a small body relative to the range
+    if body_ratio > 0.35:
+        return None
+
+    # Calculate wick sizes
+    upper_wick = high - max(open_price, close)
+    lower_wick = min(open_price, close) - low
+
+    upper_wick_ratio = upper_wick / candle_range
+    lower_wick_ratio = lower_wick / candle_range
+
+    # Body position: 0 = body at bottom, 1 = body at top
+    body_mid = (open_price + close) / 2
+    body_position = (body_mid - low) / candle_range
+
+    direction = None
+    dominant_wick = 0.0
+    opposite_wick = 0.0
+
+    # Bullish pin bar: long LOWER wick (rejection of lower prices)
+    if lower_wick_ratio > 0.55:
+        direction = "bullish"
+        dominant_wick = lower_wick_ratio
+        opposite_wick = upper_wick_ratio
+
+    # Bearish pin bar: long UPPER wick (rejection of higher prices)
+    elif upper_wick_ratio > 0.55:
+        direction = "bearish"
+        dominant_wick = upper_wick_ratio
+        opposite_wick = lower_wick_ratio
+
+    # Indecision: roughly equal wicks, small body
+    elif (body_ratio < 0.15 and
+          abs(upper_wick_ratio - lower_wick_ratio) < 0.15):
+        direction = "bullish" if close > open_price else "bearish"
+        dominant_wick = max(upper_wick_ratio, lower_wick_ratio)
+        opposite_wick = min(upper_wick_ratio, lower_wick_ratio)
+        return PinBar(
+            direction=direction,
+            strength="indecision",
+            score=0.3,
+            wick_ratio=dominant_wick / max(body_ratio, 0.01),
+            body_position=body_position,
+            candle_range=candle_range,
+            open=open_price,
+            high=high,
+            low=low,
+            close=close,
+        )
+    else:
+        return None
+
+    # Rank strength based on body position and opposite wick
+    wick_ratio = dominant_wick / max(body_ratio, 0.01)
+
+    if opposite_wick < 0.05 and body_ratio < 0.15:
+        strength = "strongest"
+        score = min(0.95, 0.80 + wick_ratio * 0.01)
+    elif opposite_wick < 0.12 and body_ratio < 0.25:
+        strength = "stronger"
+        score = min(0.85, 0.65 + wick_ratio * 0.01)
+    elif opposite_wick < 0.20:
+        strength = "strong"
+        score = min(0.75, 0.55 + wick_ratio * 0.01)
+    else:
+        return None  # Not a clean enough pin bar
+
+    return PinBar(
+        direction=direction,
+        strength=strength,
+        score=score,
+        wick_ratio=wick_ratio,
+        body_position=body_position,
+        candle_range=candle_range,
+        open=open_price,
+        high=high,
+        low=low,
+        close=close,
+    )

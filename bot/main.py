@@ -101,6 +101,10 @@ def print_snapshot(snapshot):
     if snapshot.pivots:
         p = snapshot.pivots
         print(f"  Pivots: S1=${p['S1']:,.2f} | P=${p['P']:,.2f} | R1=${p['R1']:,.2f}")
+    if snapshot.pin_bar:
+        pb = snapshot.pin_bar
+        print(f"  PinBar: {pb.strength.upper()} {pb.direction} "
+              f"(wick {pb.wick_ratio:.1f}x, score {pb.score:.0%})")
 
 
 def print_signals(signals):
