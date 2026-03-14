@@ -1,122 +1,206 @@
 """
-Polymarket API client.
-Wraps the public CLOB and Gamma APIs for fetching markets, prices, and orderbooks.
+Unified exchange client using ccxt.
+Supports Bybit, OKX, Gate.io, Binance, Bitget, KuCoin, and 100+ others.
 """
 import logging
-import time
 from typing import Any, Dict, List, Optional
 
-import requests
+import ccxt
 
 from .config import Config
 
 logger = logging.getLogger(__name__)
 
 
-class PolymarketClient:
-    """Thin wrapper around Polymarket's public REST APIs."""
+class ExchangeClient:
+    """Wraps ccxt for unified access to any supported crypto exchange."""
 
     def __init__(self, config: Config):
         self.config = config
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        })
-        self._rate_limit_until = 0.0
+        self.exchange = self._create_exchange()
 
-    # ── Public market data ───────────────────────────────────────────
+    def _create_exchange(self) -> ccxt.Exchange:
+        """Initialize the ccxt exchange instance."""
+        exchange_class = getattr(ccxt, self.config.exchange_id, None)
+        if exchange_class is None:
+            raise ValueError(
+                f"Exchange '{self.config.exchange}' not supported by ccxt. "
+                f"Supported: bybit, okx, gateio, binance, bitget, kucoin, ..."
+            )
 
-    def get_markets(
-        self,
-        limit: int = 50,
-        active: bool = True,
-        closed: bool = False,
-    ) -> List[Dict[str, Any]]:
-        """Fetch markets from the Gamma API (richer metadata)."""
         params = {
-            "limit": limit,
-            "active": active,
-            "closed": closed,
-            "order": "volume",
-            "ascending": False,
+            "enableRateLimit": True,
         }
-        data = self._gamma_get("/markets", params=params)
-        return data if isinstance(data, list) else []
 
-    def get_market(self, condition_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch a single market by condition ID."""
-        data = self._gamma_get(f"/markets/{condition_id}")
-        return data if isinstance(data, dict) else None
+        # Add API credentials if provided
+        if self.config.api_key:
+            params["apiKey"] = self.config.api_key
+        if self.config.api_secret:
+            params["secret"] = self.config.api_secret
+        if self.config.api_passphrase:
+            params["password"] = self.config.api_passphrase
 
-    def get_orderbook(self, token_id: str) -> Dict[str, Any]:
-        """Fetch the live orderbook for a token from the CLOB API."""
-        data = self._clob_get(f"/book", params={"token_id": token_id})
-        return data if isinstance(data, dict) else {"bids": [], "asks": []}
+        # Use sandbox/testnet if paper trading and exchange supports it
+        if self.config.paper_trading:
+            params["sandbox"] = True
 
-    def get_midpoint(self, token_id: str) -> Optional[float]:
-        """Get the midpoint price for a token."""
-        data = self._clob_get(f"/midpoint", params={"token_id": token_id})
-        if data and "mid" in data:
-            return float(data["mid"])
+        exchange = exchange_class(params)
+
+        # Set market type
+        if self.config.market_type == "future":
+            exchange.options["defaultType"] = "swap"
+
+        logger.info(
+            f"Connected to {self.config.exchange_id} "
+            f"({'sandbox' if self.config.paper_trading else 'LIVE'}) "
+            f"— {self.config.market_type}"
+        )
+        return exchange
+
+    # ── Market data ──────────────────────────────────────────────────
+
+    def fetch_ohlcv(
+        self,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[List]:
+        """
+        Fetch OHLCV candles.
+        Returns list of [timestamp, open, high, low, close, volume].
+        """
+        symbol = symbol or self.config.trading_pair
+        timeframe = timeframe or self.config.timeframe
+        limit = limit or self.config.candle_lookback
+
+        try:
+            candles = self.exchange.fetch_ohlcv(
+                symbol, timeframe=timeframe, limit=limit
+            )
+            logger.debug(
+                f"Fetched {len(candles)} candles for {symbol} ({timeframe})"
+            )
+            return candles
+        except ccxt.BaseError as e:
+            logger.error(f"Failed to fetch OHLCV: {e}")
+            return []
+
+    def fetch_ticker(self, symbol: Optional[str] = None) -> Optional[Dict]:
+        """Fetch current ticker (price, volume, bid, ask, etc.)."""
+        symbol = symbol or self.config.trading_pair
+        try:
+            return self.exchange.fetch_ticker(symbol)
+        except ccxt.BaseError as e:
+            logger.error(f"Failed to fetch ticker: {e}")
+            return None
+
+    def fetch_orderbook(
+        self, symbol: Optional[str] = None, limit: int = 20
+    ) -> Optional[Dict]:
+        """Fetch orderbook (bids and asks)."""
+        symbol = symbol or self.config.trading_pair
+        try:
+            return self.exchange.fetch_order_book(symbol, limit=limit)
+        except ccxt.BaseError as e:
+            logger.error(f"Failed to fetch orderbook: {e}")
+            return None
+
+    def fetch_balance(self) -> Optional[Dict]:
+        """Fetch account balance."""
+        try:
+            return self.exchange.fetch_balance()
+        except ccxt.BaseError as e:
+            logger.error(f"Failed to fetch balance: {e}")
+            return None
+
+    # ── Order execution ──────────────────────────────────────────────
+
+    def create_market_order(
+        self, side: str, amount: float, symbol: Optional[str] = None
+    ) -> Optional[Dict]:
+        """Place a market order. side = 'buy' or 'sell'."""
+        symbol = symbol or self.config.trading_pair
+        try:
+            order = self.exchange.create_order(
+                symbol=symbol,
+                type="market",
+                side=side,
+                amount=amount,
+            )
+            logger.info(
+                f"Market {side} {amount} {symbol} — "
+                f"Order ID: {order.get('id')}"
+            )
+            return order
+        except ccxt.BaseError as e:
+            logger.error(f"Market order failed: {e}")
+            return None
+
+    def create_limit_order(
+        self,
+        side: str,
+        amount: float,
+        price: float,
+        symbol: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """Place a limit order."""
+        symbol = symbol or self.config.trading_pair
+        try:
+            order = self.exchange.create_order(
+                symbol=symbol,
+                type="limit",
+                side=side,
+                amount=amount,
+                price=price,
+            )
+            logger.info(
+                f"Limit {side} {amount} {symbol} @ {price} — "
+                f"Order ID: {order.get('id')}"
+            )
+            return order
+        except ccxt.BaseError as e:
+            logger.error(f"Limit order failed: {e}")
+            return None
+
+    def cancel_order(
+        self, order_id: str, symbol: Optional[str] = None
+    ) -> bool:
+        """Cancel an open order."""
+        symbol = symbol or self.config.trading_pair
+        try:
+            self.exchange.cancel_order(order_id, symbol)
+            logger.info(f"Cancelled order {order_id}")
+            return True
+        except ccxt.BaseError as e:
+            logger.error(f"Cancel order failed: {e}")
+            return False
+
+    def fetch_open_orders(
+        self, symbol: Optional[str] = None
+    ) -> List[Dict]:
+        """Fetch all open orders."""
+        symbol = symbol or self.config.trading_pair
+        try:
+            return self.exchange.fetch_open_orders(symbol)
+        except ccxt.BaseError as e:
+            logger.error(f"Failed to fetch open orders: {e}")
+            return []
+
+    # ── Utility ──────────────────────────────────────────────────────
+
+    def get_price(self, symbol: Optional[str] = None) -> Optional[float]:
+        """Get the current mid price."""
+        ticker = self.fetch_ticker(symbol)
+        if ticker:
+            return ticker.get("last")
         return None
 
-    def get_price(self, token_id: str, side: str = "buy") -> Optional[float]:
-        """Get the best price for a token (buy or sell side)."""
-        data = self._clob_get(f"/price", params={
-            "token_id": token_id,
-            "side": side,
-        })
-        if data and "price" in data:
-            return float(data["price"])
-        return None
-
-    def get_spread(self, token_id: str) -> Optional[Dict[str, float]]:
-        """Get bid/ask spread for a token."""
-        data = self._clob_get(f"/spread", params={"token_id": token_id})
-        if data and "spread" in data:
-            return {
-                "spread": float(data["spread"]),
-                "bid": float(data.get("bid", 0)),
-                "ask": float(data.get("ask", 0)),
-            }
-        return None
-
-    # ── Internal HTTP helpers ────────────────────────────────────────
-
-    def _clob_get(
-        self, path: str, params: Optional[Dict] = None
-    ) -> Optional[Any]:
-        return self._get(self.config.clob_api_url + path, params)
-
-    def _gamma_get(
-        self, path: str, params: Optional[Dict] = None
-    ) -> Optional[Any]:
-        return self._get(self.config.gamma_api_url + path, params)
-
-    def _get(
-        self, url: str, params: Optional[Dict] = None
-    ) -> Optional[Any]:
-        """GET with basic rate-limit handling and retries."""
-        now = time.time()
-        if now < self._rate_limit_until:
-            wait = self._rate_limit_until - now
-            logger.debug(f"Rate-limited, sleeping {wait:.1f}s")
-            time.sleep(wait)
-
-        for attempt in range(3):
-            try:
-                resp = self.session.get(url, params=params, timeout=10)
-                if resp.status_code == 429:
-                    retry_after = float(resp.headers.get("Retry-After", 2))
-                    self._rate_limit_until = time.time() + retry_after
-                    logger.warning(f"Rate limited, backing off {retry_after}s")
-                    time.sleep(retry_after)
-                    continue
-                resp.raise_for_status()
-                return resp.json()
-            except requests.RequestException as e:
-                logger.warning(f"Request failed (attempt {attempt+1}): {e}")
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
-        return None
+    def get_min_order_amount(self, symbol: Optional[str] = None) -> float:
+        """Get minimum order amount for a symbol."""
+        symbol = symbol or self.config.trading_pair
+        try:
+            self.exchange.load_markets()
+            market = self.exchange.market(symbol)
+            return market.get("limits", {}).get("amount", {}).get("min", 0.0)
+        except Exception:
+            return 0.0

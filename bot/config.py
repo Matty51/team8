@@ -2,38 +2,53 @@
 Bot configuration. Override via environment variables or .env file.
 """
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
 class Config:
-    # ── Polymarket CLOB API ──────────────────────────────────────────
-    clob_api_url: str = "https://clob.polymarket.com"
-    gamma_api_url: str = "https://gamma-api.polymarket.com"
+    # ── Exchange ─────────────────────────────────────────────────────
+    # Supported: bybit, okx, gateio, binance, kucoin, bitget, etc.
+    exchange: str = "bybit"
 
-    # Auth (only needed for live trading)
+    # Auth (set via env vars — never hardcode)
     api_key: str = ""
     api_secret: str = ""
-    api_passphrase: str = ""
-    private_key: str = ""  # Wallet private key for signing
+    api_passphrase: str = ""  # Required for OKX
 
     # ── Trading mode ─────────────────────────────────────────────────
-    paper_trading: bool = True  # Start in paper mode — no real money
+    paper_trading: bool = True       # Sandbox/paper mode — no real money
+    trading_pair: str = "BTC/USDT"   # Primary pair to trade
+    timeframe: str = "5m"            # Candle timeframe for analysis
+    market_type: str = "spot"        # "spot" or "future"
 
     # ── Risk management ──────────────────────────────────────────────
-    max_position_size_usd: float = 10.0    # Max per-trade size in USDC
-    max_open_positions: int = 5            # Max simultaneous positions
-    max_daily_loss_usd: float = 20.0       # Stop trading after this loss
-    max_daily_trades: int = 50             # Circuit breaker
+    max_position_size_usd: float = 50.0    # Max per-trade size in USDT
+    max_open_positions: int = 3            # Max simultaneous positions
+    max_daily_loss_usd: float = 30.0       # Stop trading after this loss
+    max_daily_trades: int = 30             # Circuit breaker
+    stop_loss_pct: float = 1.5             # Stop-loss percentage
+    take_profit_pct: float = 3.0           # Take-profit percentage
 
     # ── Strategy parameters ──────────────────────────────────────────
-    min_spread_pct: float = 2.0            # Min YES+NO discount to act on (%)
-    min_edge_pct: float = 3.0              # Min estimated edge for value bets (%)
-    confidence_threshold: float = 0.60     # Minimum confidence to enter
+    # SMA crossover
+    sma_fast_period: int = 9
+    sma_slow_period: int = 21
+
+    # RSI
+    rsi_period: int = 14
+    rsi_oversold: float = 30.0
+    rsi_overbought: float = 70.0
+
+    # Volume spike
+    volume_spike_multiplier: float = 2.0
+
+    # General
+    min_confidence: float = 0.55
 
     # ── Scan settings ────────────────────────────────────────────────
-    scan_interval_seconds: int = 30        # How often to scan markets
-    markets_to_scan: int = 50              # How many active markets to check
+    scan_interval_seconds: int = 30
+    candle_lookback: int = 100  # How many candles to fetch for analysis
 
     # ── Logging ──────────────────────────────────────────────────────
     log_level: str = "INFO"
@@ -56,3 +71,17 @@ class Config:
                 else:
                     kwargs[f] = env_val
         return cls(**kwargs)
+
+    @property
+    def exchange_id(self) -> str:
+        """Normalize exchange name to ccxt ID."""
+        mapping = {
+            "gate": "gateio",
+            "gate.io": "gateio",
+            "bitget": "bitget",
+            "bybit": "bybit",
+            "okx": "okx",
+            "binance": "binance",
+            "kucoin": "kucoin",
+        }
+        return mapping.get(self.exchange.lower(), self.exchange.lower())

@@ -1,5 +1,8 @@
 """
-Trading strategies — decide what to buy/sell and when.
+Trading strategies — analyze market snapshots and produce trade signals.
+
+Each strategy is independent and can be enabled/disabled.
+Start with conservative ones, then add more aggressive ones as you learn.
 """
 import logging
 from dataclasses import dataclass
@@ -7,7 +10,7 @@ from enum import Enum
 from typing import List, Optional
 
 from .config import Config
-from .scanner import Opportunity
+from .scanner import MarketSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -19,147 +22,316 @@ class Side(Enum):
 
 @dataclass
 class Signal:
-    """A concrete trade signal produced by a strategy."""
-    opportunity: Opportunity
+    """A concrete trade signal."""
     strategy_name: str
+    symbol: str
     side: Side
-    token_id: str              # which token to trade
-    outcome: str               # "YES" or "NO"
-    target_price: float        # price we want to buy/sell at
-    size_usd: float            # how much to spend
+    price: float
+    size_usd: float
+    stop_loss: Optional[float]
+    take_profit: Optional[float]
     confidence: float          # 0.0 – 1.0
     reason: str
 
-    @property
-    def risk_reward_ratio(self) -> float:
-        if self.target_price <= 0 or self.target_price >= 1:
-            return 0.0
-        potential_profit = 1.0 - self.target_price
-        potential_loss = self.target_price
-        return potential_profit / potential_loss
 
+class SMACrossoverStrategy:
+    """
+    SMA Crossover — the classic trend-following strategy.
 
-class SpreadArbStrategy:
+    BUY when fast SMA crosses above slow SMA (golden cross).
+    SELL when fast SMA crosses below slow SMA (death cross).
+
+    Best for: trending markets, higher timeframes (15m+).
+    Risk level: Low-Medium.
     """
-    Buy both YES and NO when their combined price < $1.00.
-    Guaranteed profit at resolution (minus fees).
-    This is the safest strategy — your starting point.
-    """
-    NAME = "spread_arb"
+    NAME = "sma_crossover"
 
     def __init__(self, config: Config):
         self.config = config
 
-    def evaluate(self, opportunities: List[Opportunity]) -> List[Signal]:
-        signals = []
-        for opp in opportunities:
-            if opp.opportunity_type != "spread_arb":
-                continue
-            if opp.spread_discount_pct < self.config.min_spread_pct:
-                continue
+    def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
+        if snapshot.sma_fast is None or snapshot.sma_slow is None:
+            return None
 
-            # Split capital evenly between YES and NO
-            half_size = min(
-                self.config.max_position_size_usd / 2,
-                5.0,  # conservative starting cap
+        price = snapshot.current_price
+        fast = snapshot.sma_fast
+        slow = snapshot.sma_slow
+        gap_pct = abs(fast - slow) / slow * 100
+
+        # Need meaningful separation (avoid noise)
+        if gap_pct < 0.1:
+            return None
+
+        side = None
+        reason = ""
+        confidence = 0.0
+
+        if fast > slow and snapshot.trend == "bullish":
+            side = Side.BUY
+            confidence = min(0.5 + gap_pct * 0.05, 0.85)
+            reason = (
+                f"Golden cross: SMA{self.config.sma_fast_period}"
+                f"({fast:,.2f}) > SMA{self.config.sma_slow_period}"
+                f"({slow:,.2f}), gap {gap_pct:.2f}%"
+            )
+            # Boost if RSI confirms
+            if snapshot.rsi and snapshot.rsi < 60:
+                confidence += 0.05
+                reason += f", RSI {snapshot.rsi:.0f} confirms room to run"
+
+        elif fast < slow and snapshot.trend == "bearish":
+            side = Side.SELL
+            confidence = min(0.5 + gap_pct * 0.05, 0.85)
+            reason = (
+                f"Death cross: SMA{self.config.sma_fast_period}"
+                f"({fast:,.2f}) < SMA{self.config.sma_slow_period}"
+                f"({slow:,.2f}), gap {gap_pct:.2f}%"
             )
 
-            confidence = min(opp.spread_discount_pct / 10.0, 1.0)
+        if side is None or confidence < self.config.min_confidence:
+            return None
 
-            if confidence < self.config.confidence_threshold:
-                continue
+        stop_loss = (
+            price * (1 - self.config.stop_loss_pct / 100)
+            if side == Side.BUY
+            else price * (1 + self.config.stop_loss_pct / 100)
+        )
+        take_profit = (
+            price * (1 + self.config.take_profit_pct / 100)
+            if side == Side.BUY
+            else price * (1 - self.config.take_profit_pct / 100)
+        )
 
-            signals.append(Signal(
-                opportunity=opp,
-                strategy_name=self.NAME,
-                side=Side.BUY,
-                token_id=opp.token_id_yes,
-                outcome="YES",
-                target_price=opp.yes_price,
-                size_usd=half_size,
-                confidence=confidence,
-                reason=(
-                    f"Spread arb: buy YES@{opp.yes_price:.3f} + "
-                    f"NO@{opp.no_price:.3f} = {opp.combined_price:.3f} "
-                    f"({opp.spread_discount_pct:.1f}% guaranteed edge)"
-                ),
-            ))
-            signals.append(Signal(
-                opportunity=opp,
-                strategy_name=self.NAME,
-                side=Side.BUY,
-                token_id=opp.token_id_no,
-                outcome="NO",
-                target_price=opp.no_price,
-                size_usd=half_size,
-                confidence=confidence,
-                reason=f"Spread arb counterpart: buy NO@{opp.no_price:.3f}",
-            ))
-
-        return signals
+        return Signal(
+            strategy_name=self.NAME,
+            symbol=snapshot.symbol,
+            side=side,
+            price=price,
+            size_usd=self.config.max_position_size_usd,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            confidence=confidence,
+            reason=reason,
+        )
 
 
-class ValueStrategy:
+class RSIStrategy:
     """
-    Buy tokens that look underpriced based on extreme probabilities.
-    Higher risk than spread arb, but higher potential return.
+    RSI Mean Reversion — buy oversold, sell overbought.
+
+    BUY when RSI < 30 (oversold).
+    SELL when RSI > 70 (overbought).
+
+    Best for: ranging/sideways markets.
+    Risk level: Medium.
     """
-    NAME = "value"
+    NAME = "rsi"
 
     def __init__(self, config: Config):
         self.config = config
 
-    def evaluate(self, opportunities: List[Opportunity]) -> List[Signal]:
-        signals = []
-        for opp in opportunities:
-            if opp.opportunity_type != "value":
-                continue
-            if opp.estimated_edge_pct < self.config.min_edge_pct:
-                continue
+    def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
+        if snapshot.rsi is None:
+            return None
 
-            # Determine which side to trade
-            if opp.yes_price < 0.10:
-                token_id = opp.token_id_yes
-                outcome = "YES"
-                price = opp.yes_price
-            elif opp.no_price < 0.10:
-                token_id = opp.token_id_no
-                outcome = "NO"
-                price = opp.no_price
-            elif opp.yes_price > 0.90:
-                token_id = opp.token_id_yes
-                outcome = "YES"
-                price = opp.yes_price
-            elif opp.no_price > 0.90:
-                token_id = opp.token_id_no
-                outcome = "NO"
-                price = opp.no_price
-            else:
-                continue
+        price = snapshot.current_price
+        rsi_val = snapshot.rsi
+        side = None
+        reason = ""
+        confidence = 0.0
 
-            # Smaller size for higher-risk value bets
-            size = min(self.config.max_position_size_usd * 0.3, 3.0)
-            confidence = min(opp.estimated_edge_pct / 15.0, 0.9)
+        if rsi_val < self.config.rsi_oversold:
+            side = Side.BUY
+            # More oversold = more confident
+            intensity = (self.config.rsi_oversold - rsi_val) / self.config.rsi_oversold
+            confidence = min(0.55 + intensity * 0.3, 0.90)
+            reason = f"RSI oversold at {rsi_val:.1f}"
 
-            if confidence < self.config.confidence_threshold:
-                continue
+            # Boost if price near Bollinger lower band
+            if snapshot.bb_lower and price <= snapshot.bb_lower * 1.005:
+                confidence += 0.05
+                reason += f", price near BB lower ({snapshot.bb_lower:,.2f})"
 
-            signals.append(Signal(
-                opportunity=opp,
-                strategy_name=self.NAME,
-                side=Side.BUY,
-                token_id=token_id,
-                outcome=outcome,
-                target_price=price,
-                size_usd=size,
-                confidence=confidence,
-                reason=(
-                    f"Value bet: {outcome}@{price:.3f} with "
-                    f"{opp.estimated_edge_pct:.1f}% estimated edge"
-                ),
-            ))
+        elif rsi_val > self.config.rsi_overbought:
+            side = Side.SELL
+            intensity = (rsi_val - self.config.rsi_overbought) / (100 - self.config.rsi_overbought)
+            confidence = min(0.55 + intensity * 0.3, 0.90)
+            reason = f"RSI overbought at {rsi_val:.1f}"
 
-        return signals
+            if snapshot.bb_upper and price >= snapshot.bb_upper * 0.995:
+                confidence += 0.05
+                reason += f", price near BB upper ({snapshot.bb_upper:,.2f})"
+
+        if side is None or confidence < self.config.min_confidence:
+            return None
+
+        stop_loss = (
+            price * (1 - self.config.stop_loss_pct / 100)
+            if side == Side.BUY
+            else price * (1 + self.config.stop_loss_pct / 100)
+        )
+        take_profit = (
+            price * (1 + self.config.take_profit_pct / 100)
+            if side == Side.BUY
+            else price * (1 - self.config.take_profit_pct / 100)
+        )
+
+        return Signal(
+            strategy_name=self.NAME,
+            symbol=snapshot.symbol,
+            side=side,
+            price=price,
+            size_usd=self.config.max_position_size_usd * 0.7,  # smaller size
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            confidence=confidence,
+            reason=reason,
+        )
+
+
+class MACDStrategy:
+    """
+    MACD Momentum — trade momentum shifts.
+
+    BUY when MACD crosses above signal line (bullish momentum).
+    SELL when MACD crosses below signal line (bearish momentum).
+
+    Best for: confirming trends, works on all timeframes.
+    Risk level: Medium.
+    """
+    NAME = "macd"
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
+        if snapshot.macd_line is None or snapshot.macd_signal is None:
+            return None
+        if snapshot.macd_histogram is None:
+            return None
+
+        price = snapshot.current_price
+        hist = snapshot.macd_histogram
+        side = None
+        reason = ""
+        confidence = 0.0
+
+        # Histogram positive = bullish momentum
+        if hist > 0 and snapshot.trend == "bullish":
+            side = Side.BUY
+            confidence = min(0.50 + abs(hist) / price * 1000, 0.80)
+            reason = (
+                f"MACD bullish: histogram {hist:+.4f}, "
+                f"MACD({snapshot.macd_line:.4f}) > "
+                f"Signal({snapshot.macd_signal:.4f})"
+            )
+
+        elif hist < 0 and snapshot.trend == "bearish":
+            side = Side.SELL
+            confidence = min(0.50 + abs(hist) / price * 1000, 0.80)
+            reason = (
+                f"MACD bearish: histogram {hist:+.4f}, "
+                f"MACD({snapshot.macd_line:.4f}) < "
+                f"Signal({snapshot.macd_signal:.4f})"
+            )
+
+        if side is None or confidence < self.config.min_confidence:
+            return None
+
+        stop_loss = (
+            price * (1 - self.config.stop_loss_pct / 100)
+            if side == Side.BUY
+            else price * (1 + self.config.stop_loss_pct / 100)
+        )
+        take_profit = (
+            price * (1 + self.config.take_profit_pct / 100)
+            if side == Side.BUY
+            else price * (1 - self.config.take_profit_pct / 100)
+        )
+
+        return Signal(
+            strategy_name=self.NAME,
+            symbol=snapshot.symbol,
+            side=side,
+            price=price,
+            size_usd=self.config.max_position_size_usd * 0.6,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            confidence=confidence,
+            reason=reason,
+        )
+
+
+class VolumeSpikeStrategy:
+    """
+    Volume Spike Breakout — trade when volume surges with price move.
+
+    BUY when volume spikes 2x+ above average with bullish candle.
+    SELL when volume spikes 2x+ above average with bearish candle.
+
+    Best for: catching breakouts and momentum moves.
+    Risk level: Medium-High.
+    """
+    NAME = "volume_spike"
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
+        if not snapshot.has_volume_spike:
+            return None
+
+        price = snapshot.current_price
+        candle_bullish = price > snapshot.open_price
+        side = None
+        reason = ""
+        confidence = 0.0
+
+        vol_str = f"Volume spike {snapshot.volume_ratio:.1f}x avg"
+
+        if candle_bullish and snapshot.trend == "bullish":
+            side = Side.BUY
+            confidence = min(
+                0.50 + (snapshot.volume_ratio - 2.0) * 0.1, 0.80
+            )
+            reason = f"{vol_str} with bullish candle, trend confirms"
+
+        elif not candle_bullish and snapshot.trend == "bearish":
+            side = Side.SELL
+            confidence = min(
+                0.50 + (snapshot.volume_ratio - 2.0) * 0.1, 0.80
+            )
+            reason = f"{vol_str} with bearish candle, trend confirms"
+
+        if side is None or confidence < self.config.min_confidence:
+            return None
+
+        # Wider stops for volatile breakouts
+        sl_pct = self.config.stop_loss_pct * 1.5
+        tp_pct = self.config.take_profit_pct * 1.5
+
+        stop_loss = (
+            price * (1 - sl_pct / 100)
+            if side == Side.BUY
+            else price * (1 + sl_pct / 100)
+        )
+        take_profit = (
+            price * (1 + tp_pct / 100)
+            if side == Side.BUY
+            else price * (1 - tp_pct / 100)
+        )
+
+        return Signal(
+            strategy_name=self.NAME,
+            symbol=snapshot.symbol,
+            side=side,
+            price=price,
+            size_usd=self.config.max_position_size_usd * 0.5,  # smaller
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            confidence=confidence,
+            reason=reason,
+        )
 
 
 class StrategyManager:
@@ -167,21 +339,25 @@ class StrategyManager:
 
     def __init__(self, config: Config):
         self.strategies = [
-            SpreadArbStrategy(config),
-            ValueStrategy(config),
+            SMACrossoverStrategy(config),
+            RSIStrategy(config),
+            MACDStrategy(config),
+            VolumeSpikeStrategy(config),
         ]
 
     def generate_signals(
-        self, opportunities: List[Opportunity]
+        self, snapshot: MarketSnapshot
     ) -> List[Signal]:
-        all_signals = []
+        signals = []
         for strategy in self.strategies:
-            signals = strategy.evaluate(opportunities)
-            logger.info(
-                f"Strategy '{strategy.NAME}' produced {len(signals)} signals"
-            )
-            all_signals.extend(signals)
+            signal = strategy.evaluate(snapshot)
+            if signal:
+                logger.info(
+                    f"[{strategy.NAME}] {signal.side.value.upper()} "
+                    f"@ ${signal.price:,.2f} — {signal.reason}"
+                )
+                signals.append(signal)
 
         # Sort by confidence
-        all_signals.sort(key=lambda s: s.confidence, reverse=True)
-        return all_signals
+        signals.sort(key=lambda s: s.confidence, reverse=True)
+        return signals
