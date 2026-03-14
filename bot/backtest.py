@@ -6,8 +6,10 @@ Usage:
     python -m bot.backtest --pair ETH/USDT --tf 15m     # ETH 15m
     python -m bot.backtest --days 365                   # 1 year of data
     python -m bot.backtest --exchange binance            # Use Binance data
+    python -m bot.backtest --csv data.csv               # From TradingView CSV export
 """
 import argparse
+import csv
 import json
 import logging
 import math
@@ -678,6 +680,111 @@ def fetch_historical_data(
     return all_candles
 
 
+# ── CSV import ─────────────────────────────────────────────────────────
+
+
+# Known column name variants for TradingView and other CSV exports
+_COL_ALIASES = {
+    "time": ["time", "date", "datetime", "timestamp", "date/time"],
+    "open": ["open", "o"],
+    "high": ["high", "h"],
+    "low": ["low", "l"],
+    "close": ["close", "c"],
+    "volume": ["volume", "vol", "v"],
+}
+
+
+def _match_column(header: str) -> Optional[str]:
+    """Map a CSV header name to a canonical column name."""
+    h = header.strip().lower()
+    for canonical, aliases in _COL_ALIASES.items():
+        if h in aliases:
+            return canonical
+    return None
+
+
+def load_csv(filepath: str) -> List[List]:
+    """
+    Load OHLCV candle data from a CSV file (e.g. TradingView export).
+
+    Accepts any CSV with columns for time, open, high, low, close, volume.
+    Column headers are matched case-insensitively. The time column can be
+    ISO-8601, "YYYY-MM-DD", "YYYY-MM-DD HH:MM", or a unix timestamp.
+
+    Returns list of [timestamp_ms, open, high, low, close, volume].
+    """
+    candles = []
+    with open(filepath, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            raise ValueError(f"CSV file {filepath} appears to be empty")
+
+        # Build column mapping
+        col_map: Dict[str, str] = {}
+        for raw_name in reader.fieldnames:
+            canonical = _match_column(raw_name)
+            if canonical:
+                col_map[canonical] = raw_name
+
+        missing = {"time", "open", "high", "low", "close"} - set(col_map.keys())
+        if missing:
+            raise ValueError(
+                f"CSV missing required columns: {missing}. "
+                f"Found headers: {reader.fieldnames}"
+            )
+
+        has_volume = "volume" in col_map
+
+        for row in reader:
+            # Parse timestamp
+            raw_time = row[col_map["time"]].strip()
+            ts_ms = _parse_timestamp(raw_time)
+
+            o = float(row[col_map["open"]])
+            h = float(row[col_map["high"]])
+            lo = float(row[col_map["low"]])
+            c = float(row[col_map["close"]])
+            v = float(row[col_map["volume"]]) if has_volume else 0.0
+
+            candles.append([ts_ms, o, h, lo, c, v])
+
+    # Sort by timestamp ascending
+    candles.sort(key=lambda x: x[0])
+    return candles
+
+
+def _parse_timestamp(raw: str) -> int:
+    """Parse a timestamp string into milliseconds since epoch."""
+    # Try unix timestamp (seconds or milliseconds)
+    try:
+        val = float(raw)
+        if val > 1e12:
+            return int(val)  # Already ms
+        return int(val * 1000)
+    except ValueError:
+        pass
+
+    # Try common datetime formats
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%Y",
+    ):
+        try:
+            dt = datetime.strptime(raw, fmt)
+            return int(dt.timestamp() * 1000)
+        except ValueError:
+            continue
+
+    raise ValueError(f"Cannot parse timestamp: '{raw}'")
+
+
 # ── CLI entry point ────────────────────────────────────────────────────
 
 
@@ -689,6 +796,7 @@ def main():
     parser.add_argument("--exchange", default="bybit", help="Exchange for data")
     parser.add_argument("--capital", type=float, default=500, help="Starting capital")
     parser.add_argument("--data-file", help="Load candles from JSON file instead")
+    parser.add_argument("--csv", help="Load candles from CSV file (TradingView export)")
     parser.add_argument("--save-trades", help="Save trade log to JSON file")
     parser.add_argument("--save-equity", help="Save equity curve to JSON file")
     args = parser.parse_args()
@@ -704,7 +812,10 @@ def main():
     )
 
     # Load data
-    if args.data_file:
+    if args.csv:
+        candles = load_csv(args.csv)
+        print(f"Loaded {len(candles)} candles from CSV: {args.csv}")
+    elif args.data_file:
         with open(args.data_file) as f:
             candles = json.load(f)
         print(f"Loaded {len(candles)} candles from {args.data_file}")
