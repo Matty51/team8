@@ -7,6 +7,7 @@ Usage:
     python -m bot.backtest --days 365                   # 1 year of data
     python -m bot.backtest --exchange binance            # Use Binance data
     python -m bot.backtest --csv data.csv               # From TradingView CSV export
+    python -m bot.backtest --yahoo                      # Free data via Yahoo Finance
 """
 import argparse
 import csv
@@ -785,6 +786,90 @@ def _parse_timestamp(raw: str) -> int:
     raise ValueError(f"Cannot parse timestamp: '{raw}'")
 
 
+# ── Yahoo Finance data ─────────────────────────────────────────────────
+
+# Map trading pair format (BTC/USDT) to Yahoo Finance ticker (BTC-USD)
+_YF_PAIR_MAP = {
+    "USDT": "USD",
+    "BUSD": "USD",
+    "USDC": "USD",
+}
+
+# Map bot timeframes to yfinance intervals
+_YF_INTERVAL_MAP = {
+    "1m": "1m",
+    "2m": "2m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "1h",
+    "4h": "4h",  # yfinance doesn't support 4h natively
+    "1d": "1d",
+    "1w": "1wk",
+}
+
+
+def _pair_to_yf_ticker(pair: str) -> str:
+    """Convert 'BTC/USDT' to 'BTC-USD' for Yahoo Finance."""
+    base, quote = pair.split("/")
+    yf_quote = _YF_PAIR_MAP.get(quote, quote)
+    return f"{base}-{yf_quote}"
+
+
+def fetch_yahoo_data(
+    symbol: str,
+    timeframe: str,
+    days: int,
+) -> List[List]:
+    """
+    Fetch historical candle data from Yahoo Finance (free, no API key).
+
+    symbol:    Trading pair like 'BTC/USDT'
+    timeframe: Candle interval like '1h', '1d'
+    days:      Number of days of history
+
+    Returns list of [timestamp_ms, open, high, low, close, volume].
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        raise ImportError(
+            "yfinance is required for Yahoo Finance data. "
+            "Install it with: pip install yfinance"
+        )
+
+    ticker = _pair_to_yf_ticker(symbol)
+    interval = _YF_INTERVAL_MAP.get(timeframe)
+    if interval is None:
+        raise ValueError(
+            f"Timeframe '{timeframe}' not supported by Yahoo Finance. "
+            f"Supported: {list(_YF_INTERVAL_MAP.keys())}"
+        )
+
+    # yfinance limits intraday data: 1m=7d, 2m/5m/15m/30m=60d, 1h=730d
+    print(f"Fetching {symbol} ({ticker}) {timeframe} data from Yahoo Finance ({days} days)...")
+
+    period = f"{days}d"
+    data = yf.download(ticker, period=period, interval=interval, progress=False)
+
+    if data.empty:
+        print(f"  No data returned for {ticker}. Check the pair name.")
+        return []
+
+    candles = []
+    for idx, row in data.iterrows():
+        ts_ms = int(idx.timestamp() * 1000)
+        o = float(row["Open"])
+        h = float(row["High"])
+        lo = float(row["Low"])
+        c = float(row["Close"])
+        v = float(row["Volume"])
+        candles.append([ts_ms, o, h, lo, c, v])
+
+    print(f"  Total: {len(candles)} candles from Yahoo Finance")
+    return candles
+
+
 # ── CLI entry point ────────────────────────────────────────────────────
 
 
@@ -794,6 +879,7 @@ def main():
     parser.add_argument("--tf", default="1h", help="Timeframe (1m, 5m, 15m, 1h, 4h, 1d)")
     parser.add_argument("--days", type=int, default=180, help="Days of history")
     parser.add_argument("--exchange", default="bybit", help="Exchange for data")
+    parser.add_argument("--yahoo", action="store_true", help="Use Yahoo Finance for data (free, no API key)")
     parser.add_argument("--capital", type=float, default=500, help="Starting capital")
     parser.add_argument("--data-file", help="Load candles from JSON file instead")
     parser.add_argument("--csv", help="Load candles from CSV file (TradingView export)")
@@ -819,6 +905,8 @@ def main():
         with open(args.data_file) as f:
             candles = json.load(f)
         print(f"Loaded {len(candles)} candles from {args.data_file}")
+    elif args.yahoo:
+        candles = fetch_yahoo_data(args.pair, args.tf, args.days)
     else:
         candles = fetch_historical_data(
             config.exchange_id, args.pair, args.tf, args.days, config

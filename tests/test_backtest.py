@@ -4,7 +4,10 @@ import os
 import tempfile
 import pytest
 
-from bot.backtest import Backtester, BacktestResult, load_csv, _parse_timestamp
+from bot.backtest import (
+    Backtester, BacktestResult, load_csv, _parse_timestamp,
+    fetch_yahoo_data, _pair_to_yf_ticker,
+)
 from bot.config import Config
 
 
@@ -210,3 +213,16 @@ class TestCSVLoader:
     def test_parse_unix_timestamp(self):
         ts = _parse_timestamp("1704067200")
         assert ts == 1704067200000  # converted to ms
+
+
+class TestYahooFinance:
+    def test_pair_to_yf_ticker(self):
+        assert _pair_to_yf_ticker("BTC/USDT") == "BTC-USD"
+        assert _pair_to_yf_ticker("ETH/USDT") == "ETH-USD"
+        assert _pair_to_yf_ticker("BTC/BUSD") == "BTC-USD"
+        assert _pair_to_yf_ticker("SOL/USDC") == "SOL-USD"
+        assert _pair_to_yf_ticker("AAPL/USD") == "AAPL-USD"
+
+    def test_unsupported_timeframe(self):
+        with pytest.raises(ValueError, match="not supported by Yahoo Finance"):
+            fetch_yahoo_data("BTC/USDT", "3m", 30)
