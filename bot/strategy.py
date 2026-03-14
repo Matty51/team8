@@ -130,23 +130,23 @@ class SMACrossoverStrategy:
 
 class RSIStrategy:
     """
-    RSI Mean Reversion — buy oversold, sell overbought.
+    RSI strategy — combines oversold/overbought with midline crossing.
 
-    BUY when RSI < 30 (oversold).
-    SELL when RSI > 70 (overbought).
+    From Wealth Training course (Section 7):
+    - RSI period 21
+    - BUY when RSI crosses above 48 (strength confirmed)
+    - SELL when RSI drops below 48
+    - Also: BUY when RSI < 30 (oversold), SELL when RSI > 70 (overbought)
 
-    Best for: ranging/sideways markets.
+    Best for: trending and ranging markets.
     Risk level: Medium.
     """
     NAME = "rsi"
 
+    RSI_MIDLINE = 48.0  # From Wealth Training course
+
     def __init__(self, config: Config):
         self.config = config
-
-    def _position_size(self) -> float:
-        risk_usd = self.config.starting_capital * (self.config.risk_per_trade_pct / 100)
-        size = risk_usd / (self.config.stop_loss_pct / 100)
-        return min(size, self.config.max_position_size_usd)
 
     def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
         if snapshot.rsi is None:
@@ -158,14 +158,13 @@ class RSIStrategy:
         reason = ""
         confidence = 0.0
 
+        # Classic oversold/overbought signals
         if rsi_val < self.config.rsi_oversold:
             side = Side.BUY
-            # More oversold = more confident
             intensity = (self.config.rsi_oversold - rsi_val) / self.config.rsi_oversold
             confidence = min(0.55 + intensity * 0.3, 0.90)
             reason = f"RSI oversold at {rsi_val:.1f}"
 
-            # Boost if price near Bollinger lower band
             if snapshot.bb_lower and price <= snapshot.bb_lower * 1.005:
                 confidence += 0.05
                 reason += f", price near BB lower ({snapshot.bb_lower:,.2f})"
@@ -179,6 +178,19 @@ class RSIStrategy:
             if snapshot.bb_upper and price >= snapshot.bb_upper * 0.995:
                 confidence += 0.05
                 reason += f", price near BB upper ({snapshot.bb_upper:,.2f})"
+
+        # Course midline rule: RSI crossing above/below 48
+        elif (rsi_val > self.RSI_MIDLINE and snapshot.trend == "bullish" and
+              rsi_val < 60):  # Just crossed above, not already high
+            side = Side.BUY
+            confidence = 0.58
+            reason = f"RSI crossed above 48 midline ({rsi_val:.1f}) — strength confirmed"
+
+        elif (rsi_val < self.RSI_MIDLINE and snapshot.trend == "bearish" and
+              rsi_val > 40):  # Just crossed below
+            side = Side.SELL
+            confidence = 0.58
+            reason = f"RSI dropped below 48 midline ({rsi_val:.1f}) — weakness confirmed"
 
         if side is None or confidence < self.config.min_confidence:
             return None
@@ -670,8 +682,20 @@ class CCIStrategy:
         reason = ""
         confidence = 0.0
 
+        # Course Section 7: CCI zero-line crossing (primary signal)
+        # BUY when CCI crosses above zero from below
+        if -20 < cci_val < 20 and snapshot.trend == "bullish":
+            side = Side.BUY
+            confidence = 0.58
+            reason = f"CCI crossing above zero ({cci_val:.1f}) — bullish momentum"
+
+        elif -20 < cci_val < 20 and snapshot.trend == "bearish":
+            side = Side.SELL
+            confidence = 0.58
+            reason = f"CCI crossing below zero ({cci_val:.1f}) — bearish momentum"
+
         # BUY: CCI crossing above -100 (emerging from oversold)
-        if -120 < cci_val < -80:
+        elif -120 < cci_val < -80:
             side = Side.BUY
             confidence = 0.55 + abs(cci_val + 100) / 200 * 0.2
             reason = f"CCI emerging from oversold at {cci_val:.1f}"
@@ -806,6 +830,371 @@ class ChartPatternStrategy:
         )
 
 
+class SurpriseDayStrategy:
+    """
+    Power Strategy: Surprise Day — from Wealth Training Section 8.
+
+    "Very Reliable" short-term strategy.
+
+    UP (Bull Market):
+    - Price opens below previous candle's low
+    - BUY if price breaks above previous candle's low
+    - Works because shorts get squeezed
+
+    DOWN (Bear Market):
+    - Price opens above previous candle's high
+    - SELL if price breaks below previous candle's high
+    """
+    NAME = "surprise_day"
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
+        if len(snapshot.raw_closes) < 2 or len(snapshot.raw_highs) < 2:
+            return None
+
+        price = snapshot.current_price
+        prev_high = snapshot.raw_highs[-2]
+        prev_low = snapshot.raw_lows[-2]
+        curr_open = snapshot.open_price
+
+        side = None
+        reason = ""
+        confidence = 0.0
+
+        # Bull surprise: opened below previous low, now trading above it
+        if curr_open < prev_low and price > prev_low:
+            side = Side.BUY
+            confidence = 0.70
+            reason = (
+                f"Surprise Day UP: opened ${curr_open:,.2f} below prev low "
+                f"${prev_low:,.2f}, now ${price:,.2f} — short squeeze"
+            )
+
+        # Bear surprise: opened above previous high, now trading below it
+        elif curr_open > prev_high and price < prev_high:
+            side = Side.SELL
+            confidence = 0.70
+            reason = (
+                f"Surprise Day DOWN: opened ${curr_open:,.2f} above prev high "
+                f"${prev_high:,.2f}, now ${price:,.2f} — long squeeze"
+            )
+
+        if side is None:
+            return None
+
+        if confidence < self.config.min_confidence:
+            return None
+
+        stop_loss = (
+            price * (1 - self.config.stop_loss_pct / 100)
+            if side == Side.BUY
+            else price * (1 + self.config.stop_loss_pct / 100)
+        )
+        take_profit = (
+            price * (1 + self.config.take_profit_pct / 100)
+            if side == Side.BUY
+            else price * (1 - self.config.take_profit_pct / 100)
+        )
+
+        size_usd = position_size_from_risk(
+            capital=self.config.starting_capital,
+            risk_pct=self.config.risk_per_trade_pct * 0.5,
+            entry=price,
+            stop=stop_loss,
+            max_size=self.config.max_position_size_usd,
+        )
+
+        return Signal(
+            strategy_name=self.NAME,
+            symbol=snapshot.symbol,
+            side=side,
+            price=price,
+            size_usd=size_usd,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            confidence=confidence,
+            reason=reason,
+        )
+
+
+class TripleConvergenceStrategy:
+    """
+    Power Strategy: Triple Convergence — from Wealth Training Section 8.
+
+    Medium-term strategy. Three simultaneous signals must align:
+    1. PRICE — making lower lows (downtrend weakening)
+    2. MACD Histogram — showing deceleration (bars getting shorter)
+    3. RSI — making higher lows (convergence/strength)
+
+    All three converging = powerful BUY signal.
+    """
+    NAME = "triple_convergence"
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
+        if (snapshot.rsi is None or snapshot.macd_histogram is None or
+                len(snapshot.raw_closes) < 20):
+            return None
+
+        closes = snapshot.raw_closes
+        price = snapshot.current_price
+
+        # Check for price making lower lows (last 10 candles)
+        recent_lows = snapshot.raw_lows[-10:]
+        if len(recent_lows) < 10:
+            return None
+
+        # Price in a downtrend (lower lows)
+        first_half_low = min(recent_lows[:5])
+        second_half_low = min(recent_lows[5:])
+        price_lower_lows = second_half_low < first_half_low
+
+        if not price_lower_lows:
+            return None
+
+        # RSI making higher lows (convergence with price)
+        rsi_values = ind.rsi(closes, self.config.rsi_period)
+        recent_rsi = [v for v in rsi_values[-10:] if v is not None]
+        if len(recent_rsi) < 6:
+            return None
+
+        first_half_rsi = min(recent_rsi[:len(recent_rsi)//2])
+        second_half_rsi = min(recent_rsi[len(recent_rsi)//2:])
+        rsi_higher_lows = second_half_rsi > first_half_rsi
+
+        if not rsi_higher_lows:
+            return None
+
+        # MACD histogram decelerating (bars getting shorter / less negative)
+        macd_l, macd_s, macd_h = ind.macd(
+            closes, self.config.macd_fast, self.config.macd_slow,
+            self.config.macd_signal,
+        )
+        recent_hist = [v for v in macd_h[-10:] if v is not None]
+        if len(recent_hist) < 6:
+            return None
+
+        # Histogram should be negative but getting less negative
+        first_half_hist = min(recent_hist[:len(recent_hist)//2])
+        second_half_hist = min(recent_hist[len(recent_hist)//2:])
+        macd_decelerating = (first_half_hist < 0 and
+                              second_half_hist > first_half_hist)
+
+        if not macd_decelerating:
+            return None
+
+        # All three converging — powerful BUY
+        confidence = 0.75
+        reason = (
+            f"Triple Convergence: price lower lows BUT "
+            f"RSI higher lows ({second_half_rsi:.1f} > {first_half_rsi:.1f}) + "
+            f"MACD decelerating — powerful reversal signal"
+        )
+
+        stop_loss = min(recent_lows) * 0.99  # Below recent lows
+        risk = price - stop_loss
+        take_profit = price + risk * 2.5  # 2.5:1 R:R for convergence
+
+        size_usd = position_size_from_risk(
+            capital=self.config.starting_capital,
+            risk_pct=self.config.risk_per_trade_pct,
+            entry=price,
+            stop=stop_loss,
+            max_size=self.config.max_position_size_usd,
+        )
+
+        return Signal(
+            strategy_name=self.NAME,
+            symbol=snapshot.symbol,
+            side=Side.BUY,
+            price=price,
+            size_usd=size_usd,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            confidence=confidence,
+            reason=reason,
+        )
+
+
+class VolatilityExpansionStrategy:
+    """
+    Power Strategy: Volatility Expansion Breakout — from Wealth Training Section 8.
+
+    Short to medium-term strategy:
+    1. Price hits a new 1-month high today
+    2. RSI above the midline (48) = strength
+    3. Today's range is bigger than each of the previous 10 days
+    4. BUY slightly above today's high
+    """
+    NAME = "volatility_expansion"
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
+        if (snapshot.rsi is None or len(snapshot.raw_closes) < 22 or
+                len(snapshot.raw_highs) < 22):
+            return None
+
+        price = snapshot.current_price
+        curr_range = snapshot.high - snapshot.low
+
+        # 1. New 1-month high (approximately 20 trading candles)
+        month_high = max(snapshot.raw_highs[-22:-1])  # Exclude current
+        if snapshot.high <= month_high:
+            return None
+
+        # 2. RSI above midline (48 per course)
+        if snapshot.rsi < 48:
+            return None
+
+        # 3. Today's range bigger than each of previous 10 days
+        for i in range(-11, -1):
+            if i >= -len(snapshot.raw_highs):
+                prev_range = snapshot.raw_highs[i] - snapshot.raw_lows[i]
+                if curr_range <= prev_range:
+                    return None
+
+        # All conditions met — BUY signal
+        confidence = 0.72
+
+        # Boost if volume confirms
+        if snapshot.volume_ratio and snapshot.volume_ratio > 1.5:
+            confidence += 0.05
+
+        stop_loss = snapshot.low  # Stop at today's low
+        risk = price - stop_loss
+        if risk <= 0:
+            return None
+        take_profit = price + risk * 2
+
+        size_usd = position_size_from_risk(
+            capital=self.config.starting_capital,
+            risk_pct=self.config.risk_per_trade_pct * 0.7,
+            entry=price,
+            stop=stop_loss,
+            max_size=self.config.max_position_size_usd,
+        )
+
+        reason = (
+            f"Volatility Expansion: new month high ${snapshot.high:,.2f}, "
+            f"RSI {snapshot.rsi:.1f} above 48, "
+            f"range ${curr_range:,.2f} biggest in 10 periods"
+        )
+
+        return Signal(
+            strategy_name=self.NAME,
+            symbol=snapshot.symbol,
+            side=Side.BUY,
+            price=price,
+            size_usd=size_usd,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            confidence=confidence,
+            reason=reason,
+        )
+
+
+class BollingerSqueezeStrategy:
+    """
+    Bollinger Band Squeeze — from Wealth Training Section 7.
+
+    When Bollinger Bands squeeze tight (low volatility), a big move is
+    imminent. Trade in the direction of the breakout.
+
+    BUY when price breaks above upper band after squeeze.
+    SELL when price breaks below lower band after squeeze.
+    """
+    NAME = "bollinger_squeeze"
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
+        if (snapshot.bb_upper is None or snapshot.bb_lower is None or
+                snapshot.bb_middle is None or snapshot.atr is None):
+            return None
+
+        price = snapshot.current_price
+        bb_width = (snapshot.bb_upper - snapshot.bb_lower) / snapshot.bb_middle * 100
+
+        # Squeeze: bands very tight (width < 2% of price)
+        if bb_width > 2.0:
+            return None
+
+        side = None
+        reason = ""
+        confidence = 0.60
+
+        # Breakout above upper band
+        if price > snapshot.bb_upper:
+            side = Side.BUY
+            confidence = 0.65
+            reason = (
+                f"Bollinger Squeeze breakout UP: width {bb_width:.2f}%, "
+                f"price ${price:,.2f} > upper band ${snapshot.bb_upper:,.2f}"
+            )
+
+        # Breakdown below lower band
+        elif price < snapshot.bb_lower:
+            side = Side.SELL
+            confidence = 0.65
+            reason = (
+                f"Bollinger Squeeze breakout DOWN: width {bb_width:.2f}%, "
+                f"price ${price:,.2f} < lower band ${snapshot.bb_lower:,.2f}"
+            )
+
+        if side is None:
+            return None
+
+        # Boost if volume confirms
+        if snapshot.volume_ratio and snapshot.volume_ratio > 1.5:
+            confidence += 0.08
+
+        # Boost if trend aligns
+        if side == Side.BUY and snapshot.trend == "bullish":
+            confidence += 0.05
+        elif side == Side.SELL and snapshot.trend == "bearish":
+            confidence += 0.05
+
+        confidence = min(confidence, 0.85)
+        if confidence < self.config.min_confidence:
+            return None
+
+        # ATR-based stops for volatility breakouts
+        atr_stop = snapshot.atr * 2.0
+        if side == Side.BUY:
+            stop_loss = price - atr_stop
+            take_profit = price + atr_stop * 2
+        else:
+            stop_loss = price + atr_stop
+            take_profit = price - atr_stop * 2
+
+        size_usd = position_size_from_risk(
+            capital=self.config.starting_capital,
+            risk_pct=self.config.risk_per_trade_pct * 0.6,
+            entry=price,
+            stop=stop_loss,
+            max_size=self.config.max_position_size_usd,
+        )
+
+        return Signal(
+            strategy_name=self.NAME,
+            symbol=snapshot.symbol,
+            side=side,
+            price=price,
+            size_usd=size_usd,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            confidence=confidence,
+            reason=reason,
+        )
+
+
 def check_trading_checklist(
     snapshot: MarketSnapshot, signal: Signal, config: Config
 ) -> tuple[bool, List[str]]:
@@ -897,6 +1286,10 @@ class StrategyManager:
             StochasticStrategy(config),
             CCIStrategy(config),
             ChartPatternStrategy(config),
+            SurpriseDayStrategy(config),
+            TripleConvergenceStrategy(config),
+            VolatilityExpansionStrategy(config),
+            BollingerSqueezeStrategy(config),
         ]
 
     def generate_signals(
