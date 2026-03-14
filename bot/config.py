@@ -27,12 +27,12 @@ class Config:
 
     # ── Risk management ──────────────────────────────────────────────
     # From Wealth Training: max 5% risk per trade
-    risk_per_trade_pct: float = 2.0        # Risk 2% of capital per trade ($10 on $500)
-    max_risk_per_trade_pct: float = 5.0    # Hard cap: never risk more than 5% per trade
-    max_position_size_usd: float = 25.0    # Max per-trade size (5% of $500)
+    risk_per_trade_pct: float = 5.0        # Risk 5% per trade ($25 on $500) — 87% WR supports this
+    max_risk_per_trade_pct: float = 7.0    # Hard cap
+    max_position_size_usd: float = 150.0   # Max per-trade size (30% of $500)
     max_open_positions: int = 3            # Max simultaneous positions
-    max_portfolio_risk_pct: float = 6.0    # Max total capital at risk (3 x 2%)
-    max_daily_loss_usd: float = 25.0       # Stop trading after 5% daily loss
+    max_portfolio_risk_pct: float = 15.0   # Max total capital at risk (3 x 5%)
+    max_daily_loss_usd: float = 50.0       # Stop trading after 10% daily loss
     max_daily_trades: int = 20             # Circuit breaker
     stop_loss_pct: float = 1.5             # Stop-loss percentage
     take_profit_pct: float = 3.0           # Take-profit percentage (2:1 reward:risk)
