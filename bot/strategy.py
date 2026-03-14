@@ -159,7 +159,12 @@ class RSIStrategy:
         confidence = 0.0
 
         # Classic oversold/overbought signals
+        # TREND FILTER: don't sell overbought in uptrends or buy oversold
+        # in downtrends — mean reversion fails against strong trends
         if rsi_val < self.config.rsi_oversold:
+            # Only buy oversold if trend is NOT bearish
+            if snapshot.trend == "bearish":
+                return None
             side = Side.BUY
             intensity = (self.config.rsi_oversold - rsi_val) / self.config.rsi_oversold
             confidence = min(0.55 + intensity * 0.3, 0.90)
@@ -169,7 +174,15 @@ class RSIStrategy:
                 confidence += 0.05
                 reason += f", price near BB lower ({snapshot.bb_lower:,.2f})"
 
+            # Extra boost when trend aligns (bullish + oversold = pullback buy)
+            if snapshot.trend == "bullish":
+                confidence += 0.05
+                reason += ", with-trend pullback"
+
         elif rsi_val > self.config.rsi_overbought:
+            # Only sell overbought if trend is NOT bullish
+            if snapshot.trend == "bullish":
+                return None
             side = Side.SELL
             intensity = (rsi_val - self.config.rsi_overbought) / (100 - self.config.rsi_overbought)
             confidence = min(0.55 + intensity * 0.3, 0.90)
@@ -178,6 +191,10 @@ class RSIStrategy:
             if snapshot.bb_upper and price >= snapshot.bb_upper * 0.995:
                 confidence += 0.05
                 reason += f", price near BB upper ({snapshot.bb_upper:,.2f})"
+
+            if snapshot.trend == "bearish":
+                confidence += 0.05
+                reason += ", with-trend bounce short"
 
         # Course midline rule: RSI crossing above/below 48
         elif (rsi_val > self.RSI_MIDLINE and snapshot.trend == "bullish" and
@@ -695,23 +712,40 @@ class CCIStrategy:
             reason = f"CCI crossing below zero ({cci_val:.1f}) — bearish momentum"
 
         # BUY: CCI crossing above -100 (emerging from oversold)
+        # TREND FILTER: don't buy oversold in downtrends
         elif -120 < cci_val < -80:
+            if snapshot.trend == "bearish":
+                return None
             side = Side.BUY
             confidence = 0.55 + abs(cci_val + 100) / 200 * 0.2
             reason = f"CCI emerging from oversold at {cci_val:.1f}"
+            if snapshot.trend == "bullish":
+                confidence += 0.05
+                reason += ", with-trend pullback"
 
         # SELL: CCI crossing below +100 (falling from overbought)
+        # TREND FILTER: don't sell overbought in uptrends
         elif 80 < cci_val < 120:
+            if snapshot.trend == "bullish":
+                return None
             side = Side.SELL
             confidence = 0.55 + abs(cci_val - 100) / 200 * 0.2
             reason = f"CCI falling from overbought at {cci_val:.1f}"
+            if snapshot.trend == "bearish":
+                confidence += 0.05
+                reason += ", with-trend bounce short"
 
         # Strong signals at extreme readings
+        # TREND FILTER: extreme readings still respect trend
         elif cci_val < -200:
+            if snapshot.trend == "bearish":
+                return None  # Don't catch falling knives
             side = Side.BUY
             confidence = 0.70
             reason = f"CCI extreme oversold at {cci_val:.1f}"
         elif cci_val > 200:
+            if snapshot.trend == "bullish":
+                return None  # Don't short a rocket
             side = Side.SELL
             confidence = 0.70
             reason = f"CCI extreme overbought at {cci_val:.1f}"
@@ -791,14 +825,41 @@ class ChartPatternStrategy:
 
         price = snapshot.current_price
         side = Side.BUY if best.direction == "bullish" else Side.SELL
+
+        # Gate 1: require minimum pattern confidence of 0.65
+        if best.confidence < 0.65:
+            return None
+
+        # Gate 2: pattern must have a valid R:R on its own
+        pattern_risk = abs(price - best.stop_price)
+        pattern_reward = abs(best.target_price - price)
+        if pattern_risk <= 0 or pattern_reward / pattern_risk < 1.5:
+            return None
+
         confidence = best.confidence
 
-        # Boost if volume confirms (per course: price + volume same direction = good)
+        # Gate 3: require volume confirmation — patterns without volume
+        # are unreliable (per course: price + volume same direction)
         if snapshot.volume_ratio and snapshot.volume_ratio > 1.5:
-            confidence += 0.05
+            confidence += 0.08
             desc_extra = ", volume confirms"
-        else:
+        elif snapshot.volume_ratio and snapshot.volume_ratio > 1.0:
             desc_extra = ""
+        else:
+            # Low volume = don't trust the pattern
+            confidence -= 0.10
+            desc_extra = ", low volume"
+
+        # Boost if trend aligns with pattern direction
+        trend_aligned = (
+            (side == Side.BUY and snapshot.trend == "bullish") or
+            (side == Side.SELL and snapshot.trend == "bearish")
+        )
+        if trend_aligned:
+            confidence += 0.05
+        else:
+            # Counter-trend patterns need higher confidence
+            confidence -= 0.05
 
         # Boost if at longer-term trend alignment
         if side == Side.BUY and snapshot.sma_long_fast and snapshot.sma_long_slow:
@@ -1317,13 +1378,26 @@ class StrategyManager:
                         closes=snapshot.raw_closes,
                         current_atr=snapshot.atr,
                     )
-                    # Override flat SL/TP with fib-based levels
+                    # Merge Fib levels with strategy levels intelligently
                     if signal.exit_plan:
-                        signal.stop_loss = signal.exit_plan.stop_loss.price
+                        # SL: only tighten — use Fib SL if it's closer
+                        # to entry than the strategy's original SL
+                        fib_sl = signal.exit_plan.stop_loss.price
+                        if signal.side == Side.BUY:
+                            # For buys, tighter SL = higher price
+                            if fib_sl > signal.stop_loss:
+                                signal.stop_loss = fib_sl
+                        else:
+                            # For sells, tighter SL = lower price
+                            if fib_sl < signal.stop_loss:
+                                signal.stop_loss = fib_sl
+
+                        # TP: use the farthest level (TP3) as the primary
+                        # take-profit for R:R evaluation — TP1/TP2 are
+                        # for partial exits only
                         if signal.exit_plan.take_profits:
-                            # Primary TP = first level (nearest)
                             signal.take_profit = (
-                                signal.exit_plan.take_profits[0].price
+                                signal.exit_plan.take_profits[-1].price
                             )
 
                 # Run the 7-point trading checklist from Wealth Training
@@ -1333,10 +1407,25 @@ class StrategyManager:
                 if warnings:
                     for w in warnings:
                         logger.warning(f"  Checklist: {w}")
-                    # Reduce confidence for each warning
+                    # Proportional confidence penalty:
+                    # - R:R failure is a hard reject (critical)
+                    # - Other warnings are softer deductions
+                    penalty = 0.0
+                    for w in warnings:
+                        if "R:R ratio" in w:
+                            penalty += 0.20  # Hard penalty — bad R:R
+                        elif "Low volume" in w:
+                            penalty += 0.03  # Minor
+                        elif "Not with trend" in w:
+                            penalty += 0.08  # Moderate
+                        elif "Long-term trend bearish" in w:
+                            penalty += 0.05  # Moderate
+                        elif "Not close to support" in w:
+                            penalty += 0.03  # Minor
+                        else:
+                            penalty += 0.02  # Negligible
                     signal.confidence = max(
-                        signal.confidence - len(warnings) * 0.05,
-                        0.0,
+                        signal.confidence - penalty, 0.0,
                     )
 
                 logger.info(
