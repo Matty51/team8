@@ -102,3 +102,7 @@ pip-delete-this-directory.txt
 *.out
 *.run.xml
 *.synctex.gz
+
+# Downloaded PDFs and images (course materials stored in separate repo)
+*.pdf
+pdf_images/
