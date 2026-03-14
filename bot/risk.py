@@ -142,6 +142,28 @@ class RiskManager:
                 f"{self.config.min_confidence:.2f}"
             )
 
+        # Wealth Training: max 5% risk per trade (hard cap)
+        if signal.stop_loss:
+            risk_distance = abs(signal.price - signal.stop_loss)
+            risk_pct = risk_distance / signal.price * 100
+            if risk_pct > self.config.max_risk_per_trade_pct:
+                return False, (
+                    f"Trade risk {risk_pct:.1f}% exceeds max "
+                    f"{self.config.max_risk_per_trade_pct}% per trade"
+                )
+
+        # Wealth Training checklist: minimum 2:1 reward:risk ratio
+        if signal.stop_loss and signal.take_profit:
+            risk = abs(signal.price - signal.stop_loss)
+            reward = abs(signal.take_profit - signal.price)
+            if risk > 0:
+                rr_ratio = reward / risk
+                if rr_ratio < self.config.min_reward_risk_ratio:
+                    return False, (
+                        f"R:R ratio {rr_ratio:.1f}:1 below minimum "
+                        f"{self.config.min_reward_risk_ratio:.0f}:1"
+                    )
+
         return True, "Passed all risk checks"
 
     def check_stop_loss_take_profit(
