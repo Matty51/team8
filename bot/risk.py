@@ -53,6 +53,30 @@ class RiskManager:
         self.daily_stats = DailyStats()
         self.total_pnl = 0.0
 
+    def calculate_position_size(self, current_balance: float) -> float:
+        """
+        Calculate position size based on risk percentage of current balance.
+        With $500 and 2% risk: $10 max risk per trade.
+        Capped by max_position_size_usd.
+        """
+        risk_amount = current_balance * (self.config.risk_per_trade_pct / 100)
+        # Position size = risk amount / stop loss distance
+        # Since stop loss is 1.5%, position = risk / 0.015
+        position = risk_amount / (self.config.stop_loss_pct / 100)
+        return min(position, self.config.max_position_size_usd)
+
+    def get_total_risk_usd(self) -> float:
+        """Total USD at risk across all open positions."""
+        total = 0.0
+        for pos in self.positions.values():
+            if pos.stop_loss:
+                if pos.side == "buy":
+                    risk = (pos.entry_price - pos.stop_loss) * pos.amount
+                else:
+                    risk = (pos.stop_loss - pos.entry_price) * pos.amount
+                total += max(risk, 0)
+        return total
+
     def check_signal(self, signal: Signal) -> tuple[bool, str]:
         """
         Returns (allowed, reason).
@@ -86,6 +110,18 @@ class RiskManager:
             return False, (
                 f"Trade size ${signal.size_usd:.2f} exceeds max "
                 f"${self.config.max_position_size_usd:.2f}"
+            )
+
+        # Total portfolio risk check
+        max_risk = self.config.starting_capital * (
+            self.config.max_portfolio_risk_pct / 100
+        )
+        current_risk = self.get_total_risk_usd()
+        new_risk = signal.size_usd * (self.config.stop_loss_pct / 100)
+        if current_risk + new_risk > max_risk:
+            return False, (
+                f"Portfolio risk ${current_risk + new_risk:.2f} would exceed "
+                f"max ${max_risk:.2f} ({self.config.max_portfolio_risk_pct}%)"
             )
 
         # Duplicate position — don't double up

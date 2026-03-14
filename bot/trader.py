@@ -48,7 +48,7 @@ class Trader:
         self.config = config
         self.risk = risk_manager
         self.trade_log: List[TradeRecord] = []
-        self.paper_balance = 1000.0  # Starting paper balance
+        self.paper_balance = config.starting_capital
 
     def execute_signals(self, signals: List[Signal]) -> List[TradeRecord]:
         """Process signals through risk checks and execute."""

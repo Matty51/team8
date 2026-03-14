@@ -49,6 +49,12 @@ class SMACrossoverStrategy:
     def __init__(self, config: Config):
         self.config = config
 
+    def _position_size(self) -> float:
+        """Risk-based position sizing: risk_pct of capital / stop_loss distance."""
+        risk_usd = self.config.starting_capital * (self.config.risk_per_trade_pct / 100)
+        size = risk_usd / (self.config.stop_loss_pct / 100)
+        return min(size, self.config.max_position_size_usd)
+
     def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
         if snapshot.sma_fast is None or snapshot.sma_slow is None:
             return None
@@ -107,7 +113,7 @@ class SMACrossoverStrategy:
             symbol=snapshot.symbol,
             side=side,
             price=price,
-            size_usd=self.config.max_position_size_usd,
+            size_usd=self._position_size(),
             stop_loss=stop_loss,
             take_profit=take_profit,
             confidence=confidence,
@@ -129,6 +135,11 @@ class RSIStrategy:
 
     def __init__(self, config: Config):
         self.config = config
+
+    def _position_size(self) -> float:
+        risk_usd = self.config.starting_capital * (self.config.risk_per_trade_pct / 100)
+        size = risk_usd / (self.config.stop_loss_pct / 100)
+        return min(size, self.config.max_position_size_usd)
 
     def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
         if snapshot.rsi is None:
@@ -181,7 +192,7 @@ class RSIStrategy:
             symbol=snapshot.symbol,
             side=side,
             price=price,
-            size_usd=self.config.max_position_size_usd * 0.7,  # smaller size
+            size_usd=self._position_size() * 0.7,  # smaller for mean reversion
             stop_loss=stop_loss,
             take_profit=take_profit,
             confidence=confidence,
@@ -203,6 +214,11 @@ class MACDStrategy:
 
     def __init__(self, config: Config):
         self.config = config
+
+    def _position_size(self) -> float:
+        risk_usd = self.config.starting_capital * (self.config.risk_per_trade_pct / 100)
+        size = risk_usd / (self.config.stop_loss_pct / 100)
+        return min(size, self.config.max_position_size_usd)
 
     def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
         if snapshot.macd_line is None or snapshot.macd_signal is None:
@@ -254,7 +270,7 @@ class MACDStrategy:
             symbol=snapshot.symbol,
             side=side,
             price=price,
-            size_usd=self.config.max_position_size_usd * 0.6,
+            size_usd=self._position_size() * 0.6,
             stop_loss=stop_loss,
             take_profit=take_profit,
             confidence=confidence,
@@ -276,6 +292,11 @@ class VolumeSpikeStrategy:
 
     def __init__(self, config: Config):
         self.config = config
+
+    def _position_size(self) -> float:
+        risk_usd = self.config.starting_capital * (self.config.risk_per_trade_pct / 100)
+        size = risk_usd / (self.config.stop_loss_pct / 100)
+        return min(size, self.config.max_position_size_usd)
 
     def evaluate(self, snapshot: MarketSnapshot) -> Optional[Signal]:
         if not snapshot.has_volume_spike:
@@ -326,7 +347,7 @@ class VolumeSpikeStrategy:
             symbol=snapshot.symbol,
             side=side,
             price=price,
-            size_usd=self.config.max_position_size_usd * 0.5,  # smaller
+            size_usd=self._position_size() * 0.5,  # smaller for breakouts
             stop_loss=stop_loss,
             take_profit=take_profit,
             confidence=confidence,

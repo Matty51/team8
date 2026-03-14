@@ -22,13 +22,18 @@ class Config:
     timeframe: str = "5m"            # Candle timeframe for analysis
     market_type: str = "spot"        # "spot" or "future"
 
+    # ── Capital ──────────────────────────────────────────────────────
+    starting_capital: float = 500.0        # Account size for risk calculations
+
     # ── Risk management ──────────────────────────────────────────────
-    max_position_size_usd: float = 50.0    # Max per-trade size in USDT
+    risk_per_trade_pct: float = 2.0        # Risk 2% of capital per trade ($10 on $500)
+    max_position_size_usd: float = 25.0    # Max per-trade size (5% of $500)
     max_open_positions: int = 3            # Max simultaneous positions
-    max_daily_loss_usd: float = 30.0       # Stop trading after this loss
-    max_daily_trades: int = 30             # Circuit breaker
+    max_portfolio_risk_pct: float = 6.0    # Max total capital at risk (3 x 2%)
+    max_daily_loss_usd: float = 25.0       # Stop trading after 5% daily loss
+    max_daily_trades: int = 20             # Circuit breaker
     stop_loss_pct: float = 1.5             # Stop-loss percentage
-    take_profit_pct: float = 3.0           # Take-profit percentage
+    take_profit_pct: float = 3.0           # Take-profit percentage (2:1 reward:risk)
 
     # ── Strategy parameters ──────────────────────────────────────────
     # SMA crossover
