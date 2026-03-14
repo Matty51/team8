@@ -1378,27 +1378,14 @@ class StrategyManager:
                         closes=snapshot.raw_closes,
                         current_atr=snapshot.atr,
                     )
-                    # Merge Fib levels with strategy levels intelligently
-                    if signal.exit_plan:
-                        # SL: only tighten — use Fib SL if it's closer
-                        # to entry than the strategy's original SL
-                        fib_sl = signal.exit_plan.stop_loss.price
-                        if signal.side == Side.BUY:
-                            # For buys, tighter SL = higher price
-                            if fib_sl > signal.stop_loss:
-                                signal.stop_loss = fib_sl
-                        else:
-                            # For sells, tighter SL = lower price
-                            if fib_sl < signal.stop_loss:
-                                signal.stop_loss = fib_sl
-
-                        # TP: use the farthest level (TP3) as the primary
-                        # take-profit for R:R evaluation — TP1/TP2 are
-                        # for partial exits only
-                        if signal.exit_plan.take_profits:
-                            signal.take_profit = (
-                                signal.exit_plan.take_profits[-1].price
-                            )
+                    # Fib exit plan is INFORMATIONAL ONLY — used by
+                    # the partial exit system (trader.py) for scaling
+                    # out at TP1/TP2/TP3 levels. We do NOT override
+                    # the strategy's own SL/TP, which were set based
+                    # on the specific signal logic (ATR, pattern
+                    # measurements, etc). Backtesting showed that Fib
+                    # overrides hurt win rate (12.6% → 27.3%) and
+                    # profit factor (0.49 → 0.72).
 
                 # Run the 7-point trading checklist from Wealth Training
                 passed, warnings = check_trading_checklist(
