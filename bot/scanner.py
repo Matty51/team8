@@ -93,6 +93,10 @@ class MarketSnapshot:
     # Raw opens (needed for pipe bottom detection)
     raw_opens: List[float] = field(default_factory=list)
 
+    # ADX — trend strength (not direction)
+    # ADX > 25 = strong trend, ADX < 20 = choppy/ranging
+    adx: Optional[float] = None
+
     # Trend
     trend: str = "neutral"  # "bullish", "bearish", "neutral"
 
@@ -170,6 +174,9 @@ class MarketScanner:
 
         # CCI (Wealth Training: period 90)
         cci_values = ind.cci(highs, lows, closes, self.config.cci_period)
+
+        # ADX — trend strength (not direction)
+        adx_values = ind.adx(highs, lows, closes)
 
         # Chart pattern detection
         chart_patterns = ind.detect_chart_patterns(highs, lows, closes)
@@ -269,6 +276,7 @@ class MarketScanner:
             is_doji=is_doji,
             is_pipe_bottom=is_pipe_bottom,
             market_behaviour=market_behaviour,
+            adx=adx_values[-1],
             trend=trend,
         )
 

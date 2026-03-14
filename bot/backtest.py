@@ -431,6 +431,7 @@ class Backtester:
             self.config.stoch_slow_smooth,
         )
         cci_values = ind.cci(highs, lows, closes, self.config.cci_period)
+        adx_values = ind.adx(highs, lows, closes)
         chart_patterns = ind.detect_chart_patterns(highs, lows, closes)
 
         is_doji = ind.detect_doji(
@@ -517,6 +518,7 @@ class Backtester:
             is_doji=is_doji,
             is_pipe_bottom=is_pipe,
             market_behaviour=market_behaviour,
+            adx=adx_values[-1],
             trend=trend,
         )
 

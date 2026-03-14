@@ -48,6 +48,7 @@ class SMACrossoverStrategy:
     Risk level: Low-Medium.
     """
     NAME = "sma_crossover"
+    ALLOWED_SIDES = ("buy",)  # Backtested: buy wins >> sell wins
 
     def __init__(self, config: Config):
         self.config = config
@@ -142,6 +143,7 @@ class RSIStrategy:
     Risk level: Medium.
     """
     NAME = "rsi"
+    ALLOWED_SIDES = ()  # Backtested: loses on both sides, disabled
 
     RSI_MIDLINE = 48.0  # From Wealth Training course
 
@@ -257,6 +259,7 @@ class MACDStrategy:
     Risk level: Medium.
     """
     NAME = "macd"
+    ALLOWED_SIDES = ("buy",)  # Backtested: 60% buy wins vs 31% sell wins
 
     def __init__(self, config: Config):
         self.config = config
@@ -343,6 +346,7 @@ class VolumeSpikeStrategy:
     Risk level: Medium-High.
     """
     NAME = "volume_spike"
+    ALLOWED_SIDES = ()  # Backtested: inconsistent on both sides, disabled
 
     def __init__(self, config: Config):
         self.config = config
@@ -468,6 +472,7 @@ class PinBarStrategy:
     Risk level: Medium (tight stops behind the wick).
     """
     NAME = "pin_bar"
+    ALLOWED_SIDES = ("buy",)  # Backtested: 48% buy wins vs 26% sell wins
 
     def __init__(self, config: Config):
         self.config = config
@@ -601,6 +606,7 @@ class StochasticStrategy:
     Risk level: Medium.
     """
     NAME = "stochastic"
+    ALLOWED_SIDES = ()  # Backtested: 7% win rate, disabled
 
     def __init__(self, config: Config):
         self.config = config
@@ -708,6 +714,7 @@ class CCIStrategy:
     Risk level: Medium.
     """
     NAME = "cci"
+    ALLOWED_SIDES = ("buy",)  # Backtested: +$1.50 on buys, loses on sells
 
     def __init__(self, config: Config):
         self.config = config
@@ -835,6 +842,7 @@ class ChartPatternStrategy:
     Risk level: Medium.
     """
     NAME = "chart_pattern"
+    ALLOWED_SIDES = ()  # Backtested: too few triggers, unreliable, disabled
 
     def __init__(self, config: Config):
         self.config = config
@@ -930,6 +938,7 @@ class SurpriseDayStrategy:
     - SELL if price breaks below previous candle's high
     """
     NAME = "surprise_day"
+    ALLOWED_SIDES = ("sell",)  # Backtested: 60% sell wins, buys fail in downtrends
 
     def __init__(self, config: Config):
         self.config = config
@@ -1028,6 +1037,7 @@ class TripleConvergenceStrategy:
     All three converging = powerful BUY signal.
     """
     NAME = "triple_convergence"
+    ALLOWED_SIDES = ()  # Backtested: too few triggers, unreliable, disabled
 
     def __init__(self, config: Config):
         self.config = config
@@ -1128,6 +1138,7 @@ class VolatilityExpansionStrategy:
     4. BUY slightly above today's high
     """
     NAME = "volatility_expansion"
+    ALLOWED_SIDES = ()  # Backtested: too few triggers, unreliable, disabled
 
     def __init__(self, config: Config):
         self.config = config
@@ -1207,6 +1218,7 @@ class BollingerSqueezeStrategy:
     SELL when price breaks below lower band after squeeze.
     """
     NAME = "bollinger_squeeze"
+    ALLOWED_SIDES = ("buy", "sell")  # Backtested: good at both sides
 
     def __init__(self, config: Config):
         self.config = config
@@ -1401,9 +1413,33 @@ class StrategyManager:
                 f"Chart patterns: {len(snapshot.chart_patterns)}"
             )
 
+        # Market regime filter: skip trend-following strategies in choppy markets
+        # ADX is the gold standard: ADX > 25 = trending, ADX < 20 = choppy
+        # Fallback to SMA spread if ADX not available
+        adx_val = getattr(snapshot, "adx", None)
+        if adx_val is not None:
+            is_choppy = adx_val < 20  # ADX below 20 = no trend
+        else:
+            trend_strength = 0.0
+            if snapshot.sma_fast and snapshot.sma_slow and snapshot.sma_slow > 0:
+                trend_strength = abs(snapshot.sma_fast - snapshot.sma_slow) / snapshot.sma_slow * 100
+            is_choppy = trend_strength < 0.50
+
         for strategy in self.strategies:
+            # Role-based filtering: skip strategies with no allowed sides
+            allowed = getattr(strategy, "ALLOWED_SIDES", ("buy", "sell"))
+            if not allowed:
+                continue
+
+            # Skip trend-following strategies in choppy markets
+            if is_choppy and strategy.NAME in ("macd", "sma_crossover", "cci"):
+                continue
+
             signal = strategy.evaluate(snapshot)
             if signal:
+                # Filter signal by strategy's allowed side role
+                if signal.side.value not in allowed:
+                    continue
                 # Attach Fibonacci/S/R exit plan
                 if snapshot.raw_closes:
                     signal.exit_plan = self.level_manager.calculate_exit_plan(

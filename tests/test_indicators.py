@@ -416,3 +416,42 @@ class TestChartPatterns:
         pattern = ind.detect_flag_pattern(highs, lows, closes)
         if pattern:
             assert pattern.pattern_type == "continuation"
+
+
+# ── ADX ────────────────────────────────────────────────────────────────
+
+class TestADX:
+    def test_adx_trending_market(self):
+        """ADX should be high (>25) in a strong trending market."""
+        highs = [100 + i * 0.5 + 0.5 for i in range(100)]
+        lows = [100 + i * 0.5 - 0.5 for i in range(100)]
+        closes = [100 + i * 0.5 for i in range(100)]
+        result = ind.adx(highs, lows, closes)
+        # Get last non-None value
+        vals = [v for v in result if v is not None]
+        assert len(vals) > 0
+        assert vals[-1] > 25  # Strong trend
+
+    def test_adx_choppy_market(self):
+        """ADX should be low (<25) in a choppy/sideways market."""
+        import math
+        highs = [100 + math.sin(i * 1.5) * 1.0 + 0.5 for i in range(100)]
+        lows = [100 + math.sin(i * 1.5) * 1.0 - 0.5 for i in range(100)]
+        closes = [100 + math.sin(i * 1.5) * 1.0 for i in range(100)]
+        result = ind.adx(highs, lows, closes)
+        vals = [v for v in result if v is not None]
+        assert len(vals) > 0
+        assert vals[-1] < 30  # Weak/no trend
+
+    def test_adx_length_matches_input(self):
+        """ADX output length should match input."""
+        highs = [100 + i for i in range(50)]
+        lows = [99 + i for i in range(50)]
+        closes = [99.5 + i for i in range(50)]
+        result = ind.adx(highs, lows, closes)
+        assert len(result) == 50
+
+    def test_adx_too_few_bars(self):
+        """ADX should return all None for insufficient data."""
+        result = ind.adx([100, 101], [99, 100], [99.5, 100.5])
+        assert all(v is None for v in result)

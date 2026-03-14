@@ -236,6 +236,98 @@ def atr(
     return result
 
 
+def adx(
+    highs: List[float],
+    lows: List[float],
+    closes: List[float],
+    period: int = 14,
+) -> List[Optional[float]]:
+    """
+    Average Directional Index — measures trend strength (not direction).
+
+    ADX > 25 = strong trend (good for trend-following strategies)
+    ADX < 20 = weak/no trend (choppy, ranging — avoid trend strategies)
+    ADX 20-25 = emerging trend
+
+    Returns a list of ADX values (same length as input).
+    """
+    n = len(closes)
+    result: List[Optional[float]] = [None] * n
+    if n < period * 2 + 1:
+        return result
+
+    # Step 1: Calculate +DM, -DM and TR
+    plus_dm = []
+    minus_dm = []
+    true_ranges = []
+
+    for i in range(1, n):
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+
+        pdm = up_move if (up_move > down_move and up_move > 0) else 0.0
+        mdm = down_move if (down_move > up_move and down_move > 0) else 0.0
+        plus_dm.append(pdm)
+        minus_dm.append(mdm)
+
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        true_ranges.append(tr)
+
+    if len(true_ranges) < period:
+        return result
+
+    # Step 2: Smoothed +DM, -DM, TR using Wilder's smoothing
+    smooth_plus = sum(plus_dm[:period])
+    smooth_minus = sum(minus_dm[:period])
+    smooth_tr = sum(true_ranges[:period])
+
+    # Step 3: Calculate +DI, -DI, DX
+    dx_values = []
+
+    for i in range(period - 1, len(true_ranges)):
+        if i == period - 1:
+            pass  # Use initial sums
+        else:
+            smooth_plus = smooth_plus - smooth_plus / period + plus_dm[i]
+            smooth_minus = smooth_minus - smooth_minus / period + minus_dm[i]
+            smooth_tr = smooth_tr - smooth_tr / period + true_ranges[i]
+
+        if smooth_tr == 0:
+            dx_values.append(0.0)
+            continue
+
+        plus_di = 100 * smooth_plus / smooth_tr
+        minus_di = 100 * smooth_minus / smooth_tr
+
+        di_sum = plus_di + minus_di
+        if di_sum == 0:
+            dx_values.append(0.0)
+        else:
+            dx = 100 * abs(plus_di - minus_di) / di_sum
+            dx_values.append(dx)
+
+    if len(dx_values) < period:
+        return result
+
+    # Step 4: ADX = smoothed average of DX
+    adx_val = sum(dx_values[:period]) / period
+    start_idx = period * 2
+    if start_idx < n:
+        result[start_idx] = adx_val
+
+    for j in range(period, len(dx_values)):
+        adx_val = (adx_val * (period - 1) + dx_values[j]) / period
+        idx = j + period
+        if idx < n:
+            result[idx] = adx_val
+
+    return result
+
+
 # ── Fibonacci ────────────────────────────────────────────────────────
 
 # Standard Fibonacci retracement levels
