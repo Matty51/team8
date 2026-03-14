@@ -491,6 +491,15 @@ class PinBarStrategy:
         price = snapshot.current_price
         side = Side.BUY if pin.direction == "bullish" else Side.SELL
 
+        # TREND FILTER: pin bars are reversal signals, but counter-trend
+        # pins fail often. Only allow counter-trend if pin is "strongest".
+        counter_trend = (
+            (side == Side.BUY and snapshot.trend == "bearish") or
+            (side == Side.SELL and snapshot.trend == "bullish")
+        )
+        if counter_trend and pin.strength != "strongest":
+            return None
+
         # Stop-loss goes behind the wick (the rejection point)
         buffer = pin.candle_range * 0.1  # Small buffer past the wick
         if side == Side.BUY:
@@ -501,11 +510,11 @@ class PinBarStrategy:
         # Confidence from pin bar score + confirmation factors
         confidence = pin.score
 
-        # Boost confidence when pin bar aligns with trend
+        # Boost confidence when pin bar aligns with trend (pullback reversal)
         if side == Side.BUY and snapshot.trend == "bullish":
-            confidence += 0.05
+            confidence += 0.08
         elif side == Side.SELL and snapshot.trend == "bearish":
-            confidence += 0.05
+            confidence += 0.08
 
         # Boost when pin bar appears at a key level (Fib, S/R)
         at_key_level = False
@@ -609,7 +618,10 @@ class StochasticStrategy:
         confidence = 0.0
 
         # BUY: %K crosses above %D in oversold territory
+        # TREND FILTER: don't buy oversold in downtrends
         if k > d and k < self.config.stoch_oversold + 10:
+            if snapshot.trend == "bearish":
+                return None
             side = Side.BUY
             confidence = 0.55 + (self.config.stoch_oversold - k) / 100 * 0.3
             reason = f"Stochastic bullish crossover: %K({k:.1f}) > %D({d:.1f}) in oversold zone"
@@ -621,8 +633,15 @@ class StochasticStrategy:
                 confidence += 0.08
                 reason += ", slow stochastic confirms"
 
+            if snapshot.trend == "bullish":
+                confidence += 0.05
+                reason += ", with-trend pullback"
+
         # SELL: %K crosses below %D in overbought territory
+        # TREND FILTER: don't sell overbought in uptrends
         elif k < d and k > self.config.stoch_overbought - 10:
+            if snapshot.trend == "bullish":
+                return None
             side = Side.SELL
             confidence = 0.55 + (k - self.config.stoch_overbought) / 100 * 0.3
             reason = f"Stochastic bearish crossover: %K({k:.1f}) < %D({d:.1f}) in overbought zone"
@@ -632,6 +651,10 @@ class StochasticStrategy:
                     snapshot.stoch_slow_k < snapshot.stoch_slow_d):
                 confidence += 0.08
                 reason += ", slow stochastic confirms"
+
+            if snapshot.trend == "bearish":
+                confidence += 0.05
+                reason += ", with-trend bounce short"
 
         if side is None:
             return None
@@ -925,22 +948,35 @@ class SurpriseDayStrategy:
         confidence = 0.0
 
         # Bull surprise: opened below previous low, now trading above it
+        # TREND FILTER: bull surprises work best in neutral/bullish trends
+        # (short squeeze); in bearish trends it's just a dead cat bounce
         if curr_open < prev_low and price > prev_low:
+            if snapshot.trend == "bearish":
+                return None
             side = Side.BUY
             confidence = 0.70
             reason = (
                 f"Surprise Day UP: opened ${curr_open:,.2f} below prev low "
                 f"${prev_low:,.2f}, now ${price:,.2f} — short squeeze"
             )
+            if snapshot.trend == "bullish":
+                confidence += 0.05
+                reason += ", with-trend"
 
         # Bear surprise: opened above previous high, now trading below it
+        # TREND FILTER: bear surprises work best in neutral/bearish trends
         elif curr_open > prev_high and price < prev_high:
+            if snapshot.trend == "bullish":
+                return None
             side = Side.SELL
             confidence = 0.70
             reason = (
                 f"Surprise Day DOWN: opened ${curr_open:,.2f} above prev high "
                 f"${prev_high:,.2f}, now ${price:,.2f} — long squeeze"
             )
+            if snapshot.trend == "bearish":
+                confidence += 0.05
+                reason += ", with-trend"
 
         if side is None:
             return None
