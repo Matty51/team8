@@ -2,7 +2,7 @@
 Market scanner — analyzes candle data and produces technical signals.
 """
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .client import ExchangeClient
@@ -48,6 +48,21 @@ class MarketSnapshot:
 
     # Volatility
     atr: Optional[float] = None
+
+    # Fibonacci
+    fibonacci: Optional[ind.FibonacciLevels] = None
+
+    # Support/Resistance
+    support_levels: List[float] = field(default_factory=list)
+    resistance_levels: List[float] = field(default_factory=list)
+
+    # Pivot points
+    pivots: Optional[Dict[str, float]] = None
+
+    # Raw OHLCV (needed by LevelManager for exit planning)
+    raw_highs: List[float] = field(default_factory=list)
+    raw_lows: List[float] = field(default_factory=list)
+    raw_closes: List[float] = field(default_factory=list)
 
     # Trend
     trend: str = "neutral"  # "bullish", "bearish", "neutral"
@@ -123,6 +138,19 @@ class MarketScanner:
             elif sma_fast[-1] < sma_slow[-1]:
                 trend = "bearish"
 
+        # Fibonacci levels
+        fib_levels = ind.calculate_fibonacci(highs, lows, closes)
+
+        # Support/Resistance
+        support, resistance = ind.find_support_resistance(
+            highs, lows, closes
+        )
+
+        # Pivot points (from previous candle)
+        pivots = None
+        if len(highs) >= 2:
+            pivots = ind.pivot_points(highs[-2], lows[-2], closes[-2])
+
         snapshot = MarketSnapshot(
             symbol=symbol,
             timeframe=self.config.timeframe,
@@ -145,6 +173,13 @@ class MarketScanner:
             avg_volume=avg_vol[-1],
             volume_ratio=vol_ratio,
             atr=atr_values[-1],
+            fibonacci=fib_levels,
+            support_levels=support,
+            resistance_levels=resistance,
+            pivots=pivots,
+            raw_highs=highs,
+            raw_lows=lows,
+            raw_closes=closes,
             trend=trend,
         )
 

@@ -70,17 +70,98 @@ class Trader:
 
     def check_exits(self, snapshot: MarketSnapshot) -> List[TradeRecord]:
         """Check open positions for stop-loss / take-profit exits."""
-        closed = []
+        records = []
         price = snapshot.current_price
         symbol = snapshot.symbol
 
         exit_reason = self.risk.check_stop_loss_take_profit(symbol, price)
-        if exit_reason:
+        if not exit_reason:
+            return records
+
+        if exit_reason == "take_profit_partial":
+            record = self._partial_exit(symbol, price)
+            if record:
+                records.append(record)
+        else:
+            # stop_loss or take_profit_final — close entire position
             record = self._close_position(symbol, price, exit_reason)
             if record:
-                closed.append(record)
+                records.append(record)
 
-        return closed
+        return records
+
+    def _partial_exit(
+        self, symbol: str, price: float
+    ) -> Optional[TradeRecord]:
+        """Exit a portion of the position at a Fibonacci TP level."""
+        if symbol not in self.risk.positions:
+            return None
+
+        pos = self.risk.positions[symbol]
+        tp_level = self.risk.get_next_tp_level(symbol)
+        if not tp_level:
+            return None
+
+        # Calculate how much to exit
+        exit_amount = pos.amount * tp_level.pct_to_exit
+        exit_usd = pos.size_usd * tp_level.pct_to_exit
+
+        # Calculate PnL for this partial exit
+        if pos.side == "buy":
+            pnl = (price - pos.entry_price) * exit_amount
+        else:
+            pnl = (pos.entry_price - price) * exit_amount
+
+        # Execute the partial close on exchange
+        close_side = "sell" if pos.side == "buy" else "buy"
+        if not self.config.paper_trading:
+            order = self.client.create_market_order(
+                side=close_side,
+                amount=exit_amount,
+                symbol=symbol,
+            )
+            if not order:
+                logger.error(f"Failed partial exit for {symbol}")
+                return None
+
+        # Update position (reduce size)
+        pos.amount -= exit_amount
+        pos.size_usd -= exit_usd
+        self.risk.record_partial_exit(symbol)
+        self.risk.daily_stats.realized_pnl += pnl
+        self.risk.total_pnl += pnl
+
+        if self.config.paper_trading:
+            self.paper_balance += exit_usd + pnl
+
+        record = TradeRecord(
+            timestamp=datetime.utcnow().isoformat(),
+            symbol=symbol,
+            strategy=pos.strategy,
+            side=close_side,
+            price=price,
+            amount=exit_amount,
+            size_usd=exit_usd,
+            stop_loss=None,
+            take_profit=tp_level.price,
+            confidence=0.0,
+            paper=self.config.paper_trading,
+            reason=(
+                f"Partial exit ({tp_level.pct_to_exit:.0%}) at "
+                f"{tp_level.label} (${tp_level.price:,.2f}, "
+                f"{tp_level.distance_pct:+.1f}%)"
+            ),
+            pnl=pnl,
+            close_reason=f"tp_partial_{pos.tp_levels_hit}",
+        )
+        self.trade_log.append(record)
+
+        logger.info(
+            f"PARTIAL EXIT: {close_side.upper()} {exit_amount:.6f} "
+            f"{symbol} @ ${price:,.2f} | {tp_level.label} | "
+            f"PnL: ${pnl:+.2f} | Remaining: {pos.amount:.6f}"
+        )
+        return record
 
     def _execute(self, signal: Signal) -> Optional[TradeRecord]:
         """Execute a single trade (paper or live)."""

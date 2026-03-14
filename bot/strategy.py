@@ -10,6 +10,7 @@ from enum import Enum
 from typing import List, Optional
 
 from .config import Config
+from .levels import ExitPlan, LevelManager
 from .scanner import MarketSnapshot
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class Signal:
     take_profit: Optional[float]
     confidence: float          # 0.0 – 1.0
     reason: str
+    exit_plan: Optional[ExitPlan] = None  # Multi-level TP via Fibonacci/S/R
 
 
 class SMACrossoverStrategy:
@@ -356,9 +358,11 @@ class VolumeSpikeStrategy:
 
 
 class StrategyManager:
-    """Runs all strategies and aggregates signals."""
+    """Runs all strategies, aggregates signals, and attaches exit plans."""
 
     def __init__(self, config: Config):
+        self.config = config
+        self.level_manager = LevelManager(config)
         self.strategies = [
             SMACrossoverStrategy(config),
             RSIStrategy(config),
@@ -373,10 +377,33 @@ class StrategyManager:
         for strategy in self.strategies:
             signal = strategy.evaluate(snapshot)
             if signal:
+                # Attach Fibonacci/S/R exit plan
+                if snapshot.raw_closes:
+                    signal.exit_plan = self.level_manager.calculate_exit_plan(
+                        entry_price=signal.price,
+                        side=signal.side.value,
+                        highs=snapshot.raw_highs,
+                        lows=snapshot.raw_lows,
+                        closes=snapshot.raw_closes,
+                        current_atr=snapshot.atr,
+                    )
+                    # Override flat SL/TP with fib-based levels
+                    if signal.exit_plan:
+                        signal.stop_loss = signal.exit_plan.stop_loss.price
+                        if signal.exit_plan.take_profits:
+                            # Primary TP = first level (nearest)
+                            signal.take_profit = (
+                                signal.exit_plan.take_profits[0].price
+                            )
+
                 logger.info(
                     f"[{strategy.NAME}] {signal.side.value.upper()} "
                     f"@ ${signal.price:,.2f} — {signal.reason}"
                 )
+                if signal.exit_plan:
+                    for tp in signal.exit_plan.take_profits:
+                        logger.info(f"  {tp}")
+
                 signals.append(signal)
 
         # Sort by confidence

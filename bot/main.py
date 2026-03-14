@@ -88,6 +88,19 @@ def print_snapshot(snapshot):
     if snapshot.bb_upper and snapshot.bb_lower:
         print(f"  BB:     [{snapshot.bb_lower:,.2f} — "
               f"{snapshot.bb_upper:,.2f}]")
+    if snapshot.fibonacci:
+        fib = snapshot.fibonacci
+        print(f"  Fib:    swing {fib.direction} "
+              f"[${fib.swing_low:,.2f} — ${fib.swing_high:,.2f}]")
+    if snapshot.support_levels:
+        top_s = snapshot.support_levels[:2]
+        print(f"  Support:  {', '.join(f'${s:,.2f}' for s in top_s)}")
+    if snapshot.resistance_levels:
+        top_r = snapshot.resistance_levels[:2]
+        print(f"  Resist:   {', '.join(f'${r:,.2f}' for r in top_r)}")
+    if snapshot.pivots:
+        p = snapshot.pivots
+        print(f"  Pivots: S1=${p['S1']:,.2f} | P=${p['P']:,.2f} | R1=${p['R1']:,.2f}")
 
 
 def print_signals(signals):
@@ -98,6 +111,16 @@ def print_signals(signals):
         print(f"  >> [{s.strategy_name}] {s.side.value.upper()} "
               f"@ ${s.price:,.2f} | "
               f"conf: {s.confidence:.0%} | {s.reason}")
+        if s.exit_plan:
+            ep = s.exit_plan
+            print(f"     SL: ${ep.stop_loss.price:,.2f} "
+                  f"({ep.stop_loss.distance_pct:+.1f}%) "
+                  f"[{ep.stop_loss.source}]")
+            for tp in ep.take_profits:
+                print(f"     TP{ep.take_profits.index(tp)+1}: "
+                      f"${tp.price:,.2f} ({tp.distance_pct:+.1f}%) "
+                      f"exit {tp.pct_to_exit:.0%} [{tp.source}: {tp.label}]")
+            print(f"     R:R = 1:{ep.risk_reward_ratio:.1f}")
 
 
 def print_trades(trades, label="Executed"):

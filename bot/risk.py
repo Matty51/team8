@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Dict, List, Optional
 
 from .config import Config
+from .levels import ExitPlan, TPLevel
 from .strategy import Signal, Side
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,8 @@ class Position:
     take_profit: Optional[float]
     strategy: str
     timestamp: str
+    exit_plan: Optional[ExitPlan] = None
+    tp_levels_hit: int = 0  # How many TP levels we've exited at
 
 
 @dataclass
@@ -146,25 +149,67 @@ class RiskManager:
     ) -> Optional[str]:
         """
         Check if an open position has hit stop-loss or take-profit.
-        Returns "stop_loss", "take_profit", or None.
+        Returns "stop_loss", "take_profit_partial", "take_profit_final", or None.
         """
         if symbol not in self.positions:
             return None
 
         pos = self.positions[symbol]
 
+        # Check stop-loss first
         if pos.side == "buy":
             if pos.stop_loss and current_price <= pos.stop_loss:
                 return "stop_loss"
-            if pos.take_profit and current_price >= pos.take_profit:
-                return "take_profit"
         elif pos.side == "sell":
             if pos.stop_loss and current_price >= pos.stop_loss:
                 return "stop_loss"
-            if pos.take_profit and current_price <= pos.take_profit:
-                return "take_profit"
+
+        # Check multi-level take-profits (Fibonacci/S/R)
+        if pos.exit_plan and pos.exit_plan.take_profits:
+            tp_levels = pos.exit_plan.take_profits
+            next_tp_idx = pos.tp_levels_hit
+
+            if next_tp_idx < len(tp_levels):
+                next_tp = tp_levels[next_tp_idx]
+                hit = False
+
+                if pos.side == "buy" and current_price >= next_tp.price:
+                    hit = True
+                elif pos.side == "sell" and current_price <= next_tp.price:
+                    hit = True
+
+                if hit:
+                    # Is this the last TP level?
+                    if next_tp_idx >= len(tp_levels) - 1:
+                        return "take_profit_final"
+                    else:
+                        return "take_profit_partial"
+
+        # Fallback: check flat take-profit
+        elif pos.take_profit:
+            if pos.side == "buy" and current_price >= pos.take_profit:
+                return "take_profit_final"
+            elif pos.side == "sell" and current_price <= pos.take_profit:
+                return "take_profit_final"
 
         return None
+
+    def get_next_tp_level(self, symbol: str) -> Optional[TPLevel]:
+        """Get the next TP level to exit at for a position."""
+        if symbol not in self.positions:
+            return None
+        pos = self.positions[symbol]
+        if not pos.exit_plan or not pos.exit_plan.take_profits:
+            return None
+        idx = pos.tp_levels_hit
+        if idx < len(pos.exit_plan.take_profits):
+            return pos.exit_plan.take_profits[idx]
+        return None
+
+    def record_partial_exit(self, symbol: str) -> None:
+        """Record that a TP level was hit (for partial exit tracking)."""
+        if symbol in self.positions:
+            self.positions[symbol].tp_levels_hit += 1
 
     def record_trade(
         self, signal: Signal, fill_price: float, amount: float
@@ -183,6 +228,7 @@ class RiskManager:
             take_profit=signal.take_profit,
             strategy=signal.strategy_name,
             timestamp=datetime.utcnow().isoformat(),
+            exit_plan=signal.exit_plan,
         )
         logger.info(
             f"Position opened: {signal.side.value.upper()} "
