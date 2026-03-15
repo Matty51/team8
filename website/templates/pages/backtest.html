@@ -1,0 +1,368 @@
+{% extends 'template.html' %}
+{% block meta %}
+    <title>Backtest</title>
+    <style>
+        .backtest-form { max-width: 500px; margin: 0 auto; }
+        .result-card { margin-top: 1.5rem; }
+        .stat-row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid rgba(255,255,255,0.1); }
+        .stat-label { color: #adb5bd; }
+        .stat-value { font-weight: bold; }
+        .positive { color: #00bc8c; }
+        .negative { color: #e74c3c; }
+        .spinner { display: none; text-align: center; padding: 2rem; }
+        .spinner.active { display: block; }
+        .trade-list { max-height: 400px; overflow-y: auto; }
+        .trade-item { padding: 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 0.85rem; }
+        .strat-row { display: flex; justify-content: space-between; padding: 0.3rem 0; font-size: 0.9rem; }
+        .equity-canvas { width: 100%; height: 200px; margin-top: 1rem; }
+        #error-msg { display: none; }
+    </style>
+{% endblock %}
+{% block main %}
+<div class="container py-4">
+    <h2 class="text-center mb-4">Backtest Strategies</h2>
+
+    <div class="backtest-form">
+        <div class="form-group">
+            <label>Trading Pair</label>
+            <select id="pair" class="form-control">
+                <option value="BTC/USDT">BTC/USDT</option>
+                <option value="ETH/USDT">ETH/USDT</option>
+                <option value="SOL/USDT">SOL/USDT</option>
+                <option value="XRP/USDT">XRP/USDT</option>
+                <option value="DOGE/USDT">DOGE/USDT</option>
+                <option value="ADA/USDT">ADA/USDT</option>
+                <option value="AVAX/USDT">AVAX/USDT</option>
+                <option value="LINK/USDT">LINK/USDT</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label>Timeframe</label>
+            <select id="timeframe" class="form-control">
+                <option value="15m">15 min</option>
+                <option value="30m">30 min</option>
+                <option value="1h" selected>1 hour</option>
+                <option value="1d">1 day</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label>Days of History</label>
+            <input type="number" id="days" class="form-control" value="90" min="7" max="730">
+        </div>
+
+        <div class="form-group">
+            <label>Starting Capital ($)</label>
+            <input type="number" id="capital" class="form-control" value="500" min="100" max="100000" step="50">
+        </div>
+
+        <button id="run-btn" class="btn btn-primary btn-block btn-lg" onclick="runBacktest()">
+            Run Backtest
+        </button>
+    </div>
+
+    <div id="spinner" class="spinner">
+        <div class="spinner-border text-primary" role="status" style="width: 3rem; height: 3rem;">
+            <span class="sr-only">Loading...</span>
+        </div>
+        <p class="mt-3">Fetching data & running backtest...</p>
+        <p class="text-muted" style="font-size: 0.85rem;">This may take 30-60 seconds</p>
+    </div>
+
+    <div id="error-msg" class="alert alert-danger result-card" role="alert"></div>
+
+    <div id="results" style="display: none;">
+        <!-- Summary -->
+        <div class="card result-card bg-dark">
+            <div class="card-header"><strong id="res-title">Results</strong></div>
+            <div class="card-body">
+                <div class="stat-row">
+                    <span class="stat-label">Period</span>
+                    <span class="stat-value" id="res-period"></span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Starting Capital</span>
+                    <span class="stat-value" id="res-start-cap"></span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Ending Capital</span>
+                    <span class="stat-value" id="res-end-cap"></span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Total Return</span>
+                    <span class="stat-value" id="res-return"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Trade stats -->
+        <div class="card result-card bg-dark">
+            <div class="card-header"><strong>Trade Statistics</strong></div>
+            <div class="card-body">
+                <div class="stat-row">
+                    <span class="stat-label">Total Trades</span>
+                    <span class="stat-value" id="res-trades"></span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Win Rate</span>
+                    <span class="stat-value" id="res-winrate"></span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Winners / Losers</span>
+                    <span class="stat-value" id="res-wl"></span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Avg Win</span>
+                    <span class="stat-value positive" id="res-avgwin"></span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Avg Loss</span>
+                    <span class="stat-value negative" id="res-avgloss"></span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Largest Win</span>
+                    <span class="stat-value positive" id="res-bigwin"></span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Largest Loss</span>
+                    <span class="stat-value negative" id="res-bigloss"></span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Profit Factor</span>
+                    <span class="stat-value" id="res-pf"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Risk metrics -->
+        <div class="card result-card bg-dark">
+            <div class="card-header"><strong>Risk Metrics</strong></div>
+            <div class="card-body">
+                <div class="stat-row">
+                    <span class="stat-label">Max Drawdown</span>
+                    <span class="stat-value negative" id="res-dd"></span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Sharpe Ratio</span>
+                    <span class="stat-value" id="res-sharpe"></span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Avg Bars Held</span>
+                    <span class="stat-value" id="res-bars"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Equity curve -->
+        <div class="card result-card bg-dark">
+            <div class="card-header"><strong>Equity Curve</strong></div>
+            <div class="card-body">
+                <canvas id="equity-chart" class="equity-canvas"></canvas>
+            </div>
+        </div>
+
+        <!-- Strategy breakdown -->
+        <div class="card result-card bg-dark">
+            <div class="card-header"><strong>Strategy Breakdown</strong></div>
+            <div class="card-body" id="res-strategies"></div>
+        </div>
+
+        <!-- Recent trades -->
+        <div class="card result-card bg-dark mb-4">
+            <div class="card-header"><strong>Trade Log</strong></div>
+            <div class="card-body trade-list" id="res-trades-list"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+function runBacktest() {
+    var btn = document.getElementById('run-btn');
+    var spinner = document.getElementById('spinner');
+    var results = document.getElementById('results');
+    var errorMsg = document.getElementById('error-msg');
+
+    btn.disabled = true;
+    btn.textContent = 'Running...';
+    spinner.className = 'spinner active';
+    results.style.display = 'none';
+    errorMsg.style.display = 'none';
+
+    var payload = {
+        pair: document.getElementById('pair').value,
+        timeframe: document.getElementById('timeframe').value,
+        days: parseInt(document.getElementById('days').value),
+        capital: parseFloat(document.getElementById('capital').value)
+    };
+
+    fetch('/api/backtest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(function(resp) { return resp.json().then(function(d) { return { ok: resp.ok, data: d }; }); })
+    .then(function(result) {
+        spinner.className = 'spinner';
+        btn.disabled = false;
+        btn.textContent = 'Run Backtest';
+
+        if (!result.ok) {
+            errorMsg.textContent = result.data.error || 'Backtest failed';
+            errorMsg.style.display = 'block';
+            return;
+        }
+
+        displayResults(result.data);
+    })
+    .catch(function(err) {
+        spinner.className = 'spinner';
+        btn.disabled = false;
+        btn.textContent = 'Run Backtest';
+        errorMsg.textContent = 'Network error: ' + err.message;
+        errorMsg.style.display = 'block';
+    });
+}
+
+function displayResults(r) {
+    var results = document.getElementById('results');
+    results.style.display = 'block';
+
+    document.getElementById('res-title').textContent = r.symbol + ' (' + r.timeframe + ') - ' + r.total_bars + ' bars';
+    document.getElementById('res-period').textContent = r.start_date + ' to ' + r.end_date;
+    document.getElementById('res-start-cap').textContent = '$' + r.starting_capital.toLocaleString();
+    document.getElementById('res-end-cap').textContent = '$' + r.ending_capital.toLocaleString();
+
+    var retEl = document.getElementById('res-return');
+    retEl.textContent = (r.total_return_pct >= 0 ? '+' : '') + r.total_return_pct + '%';
+    retEl.className = 'stat-value ' + (r.total_return_pct >= 0 ? 'positive' : 'negative');
+
+    document.getElementById('res-trades').textContent = r.total_trades;
+    document.getElementById('res-winrate').textContent = r.win_rate + '%';
+    document.getElementById('res-wl').textContent = r.winning_trades + ' / ' + r.losing_trades;
+    document.getElementById('res-avgwin').textContent = '$' + r.avg_win.toFixed(2);
+    document.getElementById('res-avgloss').textContent = '$' + r.avg_loss.toFixed(2);
+    document.getElementById('res-bigwin').textContent = '$' + r.largest_win.toFixed(2);
+    document.getElementById('res-bigloss').textContent = '$' + r.largest_loss.toFixed(2);
+    document.getElementById('res-pf').textContent = r.profit_factor;
+    document.getElementById('res-dd').textContent = r.max_drawdown_pct + '% ($' + r.max_drawdown_usd.toFixed(2) + ')';
+    document.getElementById('res-sharpe').textContent = r.sharpe_ratio;
+    document.getElementById('res-bars').textContent = r.avg_bars_held;
+
+    // Strategy breakdown
+    var stratHtml = '';
+    var strats = Object.keys(r.trades_by_strategy).sort();
+    for (var i = 0; i < strats.length; i++) {
+        var s = r.trades_by_strategy[strats[i]];
+        var pnlClass = s.total_pnl >= 0 ? 'positive' : 'negative';
+        stratHtml += '<div class="strat-row">' +
+            '<span>' + strats[i] + '</span>' +
+            '<span>' + s.trades + ' trades, ' + s.win_rate.toFixed(0) + '% win, ' +
+            '<span class="' + pnlClass + '">$' + s.total_pnl.toFixed(2) + '</span></span></div>';
+    }
+    document.getElementById('res-strategies').innerHTML = stratHtml;
+
+    // Trade log
+    var tradeHtml = '';
+    var trades = r.trades;
+    for (var j = 0; j < trades.length; j++) {
+        var t = trades[j];
+        var pnlC = t.pnl >= 0 ? 'positive' : 'negative';
+        var sideColor = t.side === 'buy' ? 'positive' : 'negative';
+        tradeHtml += '<div class="trade-item">' +
+            '<span class="' + sideColor + '">' + t.side.toUpperCase() + '</span> ' +
+            t.strategy + '<br>' +
+            '<small>' + t.entry_time.substring(0, 16) + ' &rarr; ' + t.exit_time.substring(0, 16) + '</small><br>' +
+            '<small>$' + t.entry_price + ' &rarr; $' + t.exit_price +
+            ' | <span class="' + pnlC + '">$' + t.pnl.toFixed(2) + ' (' + t.pnl_pct.toFixed(1) + '%)</span>' +
+            ' | ' + t.exit_reason + '</small></div>';
+    }
+    document.getElementById('res-trades-list').innerHTML = tradeHtml || '<p class="text-muted">No trades taken</p>';
+
+    // Equity curve (simple canvas chart)
+    drawEquityCurve(r.equity_curve);
+
+    // Scroll to results
+    results.scrollIntoView({ behavior: 'smooth' });
+}
+
+function drawEquityCurve(data) {
+    var canvas = document.getElementById('equity-chart');
+    var ctx = canvas.getContext('2d');
+    canvas.width = canvas.offsetWidth * 2;
+    canvas.height = 400;
+    ctx.scale(2, 2);
+
+    var w = canvas.offsetWidth;
+    var h = 200;
+
+    ctx.clearRect(0, 0, w, h);
+
+    if (data.length < 2) return;
+
+    // Sample data if too many points
+    var points = data;
+    if (data.length > 500) {
+        var step = Math.ceil(data.length / 500);
+        points = [];
+        for (var i = 0; i < data.length; i += step) points.push(data[i]);
+        points.push(data[data.length - 1]);
+    }
+
+    var minVal = Math.min.apply(null, points);
+    var maxVal = Math.max.apply(null, points);
+    var range = maxVal - minVal || 1;
+    var pad = 10;
+
+    var startVal = points[0];
+
+    // Draw grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    ctx.lineWidth = 0.5;
+    for (var g = 0; g < 5; g++) {
+        var gy = pad + (h - 2 * pad) * g / 4;
+        ctx.beginPath();
+        ctx.moveTo(0, gy);
+        ctx.lineTo(w, gy);
+        ctx.stroke();
+    }
+
+    // Draw starting capital line
+    var startY = pad + (h - 2 * pad) * (1 - (startVal - minVal) / range);
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(0, startY);
+    ctx.lineTo(w, startY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Draw equity line
+    var lastVal = points[points.length - 1];
+    ctx.strokeStyle = lastVal >= startVal ? '#00bc8c' : '#e74c3c';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+
+    for (var j = 0; j < points.length; j++) {
+        var x = j / (points.length - 1) * w;
+        var y = pad + (h - 2 * pad) * (1 - (points[j] - minVal) / range);
+        if (j === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Fill under curve
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    ctx.fillStyle = lastVal >= startVal ? 'rgba(0,188,140,0.1)' : 'rgba(231,76,60,0.1)';
+    ctx.fill();
+
+    // Labels
+    ctx.fillStyle = '#adb5bd';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('$' + maxVal.toFixed(0), 4, pad + 12);
+    ctx.fillText('$' + minVal.toFixed(0), 4, h - pad);
+}
+</script>
+{% endblock main %}
